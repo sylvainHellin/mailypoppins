@@ -1757,8 +1757,12 @@ struct TickTime {
 /// - A quick tick with a larger bound (`mp sync -n 150`) is a user asking for
 ///   that many messages: no budget and no ceiling, as the guarded pass it
 ///   replaced had neither and as a full Graph tick has none.
-/// - A full tick keeps the IMAP budget and has no Graph ceiling, which must
-///   let it finish however large the mailbox.
+/// - A full tick has neither, which must let it finish however large the
+///   mailbox: it is the pass the user asks for to fetch every body, and the
+///   only one that can, since an IMAP quick window is the newest UIDs and the
+///   older bodies a cut full pass left would wait below it for the next full
+///   sync while the full pass reported itself done. It is stopped with its
+///   cancel instead (PERSO-321).
 ///
 /// The HTTP client's own connect and idle-read timeouts still bound each
 /// Graph request when there is no ceiling.
@@ -1768,12 +1772,8 @@ fn tick_time(kind: TickKind, limit: usize, body_deadline: Option<Duration>) -> T
             body_budget: body_deadline,
             ceiling: body_deadline.map(|deadline| deadline * GRAPH_TICK_CEILING_FACTOR),
         },
-        TickKind::Quick => TickTime {
+        TickKind::Quick | TickKind::Full => TickTime {
             body_budget: None,
-            ceiling: None,
-        },
-        TickKind::Full => TickTime {
-            body_budget: body_deadline,
             ceiling: None,
         },
     }
@@ -1955,7 +1955,7 @@ mod tests {
 
     /// A quick tick with the usual bound spends the body-fetch deadline and
     /// has a Graph ceiling; one with a larger bound (`mp sync -n 150`) has
-    /// neither, and a full one keeps the IMAP budget and has no ceiling.
+    /// neither, and nor has a full one.
     #[test]
     fn a_ticks_time_follows_its_kind_and_its_bound() {
         let deadline = Some(Duration::from_secs(30));
@@ -1976,7 +1976,7 @@ mod tests {
         assert_eq!(
             tick_time(TickKind::Full, usize::MAX, deadline),
             TickTime {
-                body_budget: deadline,
+                body_budget: None,
                 ceiling: None,
             }
         );
@@ -2171,41 +2171,6 @@ mod tests {
         let next = runtime.tick(TickKind::Quick).await;
         assert!(!next.stopped, "a stop belongs to the tick it was asked of");
         assert!(runtime.backlog_owed());
-    }
-
-    /// A quick tick's body carries the account's body budget and a full
-    /// one's carries none: a full sync is the one that fetches every body,
-    /// and an IMAP quick window never reaches the older ones a cut full pass
-    /// would leave behind.
-    #[tokio::test]
-    async fn only_a_quick_tick_carries_the_body_budget() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut hooks = quiet_hooks();
-        hooks.body = {
-            let seen = Arc::clone(&seen);
-            Arc::new(move |ctx: TickContext| {
-                lock(&seen).push((ctx.kind, ctx.body_deadline));
-                async { Ok(()) }.boxed()
-            })
-        };
-        let runtime = AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 9), 1, hooks)
-            .expect("a free lock");
-
-        let quick = runtime.tick(TickKind::Quick).await;
-        let full = runtime.tick(TickKind::Full).await;
-        assert_eq!(
-            *lock(&seen),
-            [
-                (TickKind::Quick, Some(Duration::from_secs(9))),
-                (TickKind::Full, None),
-            ]
-        );
-        assert_eq!(quick.body_deadline, Some(Duration::from_secs(9)));
-        assert_eq!(
-            full.body_deadline, None,
-            "the outcome reports the budget it ran under"
-        );
     }
 
     /// A body that fails is reported on the outcome, and the tail still ran.

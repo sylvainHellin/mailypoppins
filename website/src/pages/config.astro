@@ -209,11 +209,13 @@ default_from = "your.name@example.com"`} />
         budget stops between batches and keeps what it has downloaded; the mailbox it was in
         and the ones after it resume on the next sync, so a large backlog arrives over
         several syncs instead of holding one open; newest mail is downloaded first. Nothing
-        is deleted and no flag delta is advanced on a sync that stopped early. Every sync of
-        the whole account the daemon runs is bounded this way, whether the TUI, the
-        schedule or <code>mp sync</code> started it; <code>mp sync --mailbox</code>,
+        is deleted and no flag delta is advanced on a sync that stopped early. Every quick
+        sync of the whole account the daemon runs is bounded this way, whether the TUI, the
+        schedule or <code>mp sync</code> started it. A full sync (<code>mp sync --full</code>,
+        the TUI's and the desktop app's <code>sS</code>), <code>mp sync --mailbox</code>,
         <code>mp sync --dry-run</code> and <code>mp sync -n</code> with more than 100 ignore
-        the budget and download everything they owe.
+        the budget and download everything they owe; a full sync is stopped by cancelling it
+        instead.
       </p>
       <p>
         <code>sync_interval_secs</code> is how long the daemon lets the account go without

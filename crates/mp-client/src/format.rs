@@ -408,7 +408,8 @@ fn cli_lines(outcome: &SyncCompleted, dry_run: bool) -> Vec<String> {
     }
     // A whole-account `mp sync` runs as the account's tick and carries its
     // body-fetch deadline, unless `-n` asks for more than the usual quick
-    // bound. The TUI's wording at `ℹ`, because a deadline stop is progress
+    // bound or `--full` asks for every body. The TUI's wording at `ℹ`,
+    // because a deadline stop is progress
     // (#0113).
     if outcome.bodies_truncated > 0 {
         lines.push(format!(
