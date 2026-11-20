@@ -44,6 +44,8 @@ export class Terminal {
     this.focusCount++;
   }
   attachCustomKeyEventHandler(_h: (e: KeyboardEvent) => boolean) {}
+  clearTextureAtlas() {}
+  refresh(_start: number, _end: number) {}
   dispose() {
     this.disposed = true;
     for (const a of this.addons) a.dispose();

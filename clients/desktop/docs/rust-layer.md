@@ -1071,7 +1071,7 @@ The policy lives in `tauri.conf.json` under `app.security.csp`:
 
 - `default-src 'self'`, `script-src 'self'`, `connect-src ipc: http://ipc.localhost`.
 - `style-src 'self' 'unsafe-inline'`, because Vite injects CSS through `<style>` tags in development and Base UI positions popovers with inline `style` attributes.
-- `img-src 'self' data:` and `font-src 'self' data:` for the shell itself, since Vite inlines assets under 4 KiB as `data:` URLs; the reader does not need them, its document carries its own policy.
+- `img-src 'self' data:` and `font-src 'self' data:` for the shell itself, since Vite inlines assets under 4 KiB as `data:` URLs and serves the terminal's symbols font ([shell.md](shell.md), "The terminal pane") from the app's own origin; the reader does not need them, its document carries its own policy.
 - `frame-src mpmsg: http://mpmsg.localhost https: http:`: `https:` and `http:` are there only so that a link clicked in the reader reaches `on_navigation`, which refuses it; with `frame-src mpmsg:` alone the CSP blocks the navigation first and the click dies silently.
 - `dangerousDisableAssetCspModification: ["style-src"]` stops Tauri from adding a nonce to `style-src` when `index.html` carries an inline `<style>`, which would switch `'unsafe-inline'` off.
 

@@ -459,7 +459,9 @@ The Channel carries output as raw bytes (an `ArrayBuffer` per frame) that go to 
 - `visible={false}` hides the pane and keeps the terminal and its buffer; shown again, it refits and takes the focus.
 - Unmounting disposes xterm and its addons and leaves the session running: killing the child is the owner's explicit `kill`.
 - The renderer is WebGL, with xterm's DOM renderer when WebGL refuses or its context is lost; unicode11 gives the CJK and emoji widths Neovim assumes, and the clipboard addon answers OSC 52.
-- Colours follow the palette on `<html>` and change with it, and the font is the app's `font-mono` at `text-sm` ([design-tokens.md](design-tokens.md), "Terminal").
+- Colours follow the palette on `<html>` and change with it, and the font is the app's `font-mono` at `text-sm` followed by the Nerd Fonts symbols the app ships, for the icons in the private use areas ([design-tokens.md](design-tokens.md), "Terminal").
+- The symbols font is fetched when a pane mounts, by `document.fonts.load` with one of its characters, since canvas text never starts the download of a `unicode-range` face; the spawn does not wait for it, and once it arrives the pane clears the WebGL renderer's glyph atlas and redraws every row, so an icon drawn before it does not stay blank.
+  A failed load leaves the pane working, with a warning in the console.
 - The spawn carries the palette painted then (`currentScheme` in `src/app/theme.ts`, `dark` or `light`, a `system` theme already resolved), and the editor follows it: see "The embedded editor", "The editor's colours".
 
 While the terminal has the focus, every key is the editor's, Escape and Tab included: `isEditable` counts any element inside `[data-slot="terminal"]` as editable, and the keymap returns before its Escape rule.

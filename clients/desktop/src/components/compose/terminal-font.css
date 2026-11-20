@@ -1,0 +1,15 @@
+/*
+ * The Nerd Fonts symbols (v3.5.1, MIT; the icon sets' own licences are in
+ * src/assets/fonts/symbols-nerd-font/README.md), the embedded terminal's
+ * fallback for the icons editor plugins draw. Limited to the private use
+ * areas, so it never takes a character the app's mono font has.
+ *
+ * TerminalPane imports this file, so the face is declared only once a
+ * terminal opens, and terminalTheme.ts's loadSymbolsFont fetches it.
+ */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  src: url("../../assets/fonts/symbols-nerd-font/SymbolsNerdFontMono-Regular.woff2") format("woff2");
+  font-display: block;
+  unicode-range: U+E000-F8FF, U+F0000-FFFFD, U+100000-10FFFD;
+}

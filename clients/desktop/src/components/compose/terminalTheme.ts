@@ -48,12 +48,36 @@ export function terminalTheme(root: Element = document.documentElement): ITheme 
   return theme as ITheme;
 }
 
-/** The app's mono font, as the host's `font-mono text-sm` classes resolve it. */
+/**
+ * The Nerd Fonts symbols the app ships, declared in terminal-font.css for the
+ * private use areas alone, where editor plugins put their icons.
+ */
+export const SYMBOLS_FONT = "Symbols Nerd Font Mono";
+
+/** A character of the symbols font's range (nf-md-note), for the load to name. */
+const SYMBOLS_SAMPLE = "\u{F0188}";
+
+/**
+ * The app's mono font, as the host's `font-mono text-sm` classes resolve it,
+ * with the symbols font after it for the icons no system mono font carries.
+ */
 export function terminalFont(host: Element): { fontFamily: string; fontSize: number } {
   const style = getComputedStyle(host);
   const size = Number.parseFloat(style.fontSize);
   return {
-    fontFamily: style.fontFamily.trim() || "monospace",
+    fontFamily: `${style.fontFamily.trim() || "monospace"}, "${SYMBOLS_FONT}"`,
     fontSize: Number.isFinite(size) && size > 0 ? size : 14,
   };
+}
+
+/**
+ * Fetches the symbols font. Text drawn on a canvas, as xterm's WebGL renderer
+ * draws it, never starts the download of a `unicode-range` face, so the pane
+ * asks for it by name with a character of the range. Resolves at once where
+ * the page has no FontFaceSet (jsdom); rejects when the file fails to load.
+ */
+export async function loadSymbolsFont(fontSize: number): Promise<void> {
+  const fonts: FontFaceSet | undefined = document.fonts;
+  if (!fonts) return;
+  await fonts.load(`${fontSize}px "${SYMBOLS_FONT}"`, SYMBOLS_SAMPLE);
 }

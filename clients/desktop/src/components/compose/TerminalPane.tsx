@@ -13,8 +13,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import "@/components/compose/terminal-font.css";
 import { tauriBridge, type DraftRun, type TerminalBridge, type TerminalExit, type TerminalStarted } from "@/lib/terminal";
-import { terminalFont, terminalTheme } from "@/components/compose/terminalTheme";
+import { loadSymbolsFont, terminalFont, terminalTheme } from "@/components/compose/terminalTheme";
 import { currentScheme } from "@/app/theme";
 
 /** How long a run of container resizes settles before the PTY hears of it. */
@@ -92,7 +93,8 @@ export function TerminalPane<R extends object = DraftRun>({
     const { session: draft, bridge: pty } = latest.current;
     const report = (e: unknown) => latest.current.onError?.(e);
 
-    const term = new Terminal({ allowProposedApi: true, theme: terminalTheme(), ...terminalFont(host) });
+    const font = terminalFont(host);
+    const term = new Terminal({ allowProposedApi: true, theme: terminalTheme(), ...font });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new Unicode11Addon());
@@ -110,6 +112,18 @@ export function TerminalPane<R extends object = DraftRun>({
     // Keys typed while the spawn is in flight, sent once it answers.
     let typed = "";
     let sent = { cols: term.cols, rows: term.rows };
+
+    // The WebGL renderer caches each glyph in a texture atlas the first time
+    // it draws it, so an icon drawn before the symbols font arrived stays a
+    // blank cell until the atlas is rebuilt. The spawn does not wait for it.
+    loadSymbolsFont(font.fontSize).then(
+      () => {
+        if (disposed) return;
+        term.clearTextureAtlas();
+        term.refresh(0, term.rows - 1);
+      },
+      (e: unknown) => console.warn("the terminal's symbols font did not load; Nerd Font icons draw blank", e),
+    );
 
     const sync = () => {
       if (disposed) return;

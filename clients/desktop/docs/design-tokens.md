@@ -87,6 +87,9 @@ It reads the same tokens: `background`, `foreground`, `muted`, `accent`, `primar
 Each group sets the hex value for `termguicolors` and an ANSI index from 0 to 15 for a terminal without it: a `terminal-*` colour takes its own slot, a surface the nearest slot of its palette (`muted`, `accent`, `border` and `selection` take black in dark and white in light), and Normal takes `NONE`, the pane's own `background` and `foreground`, so the editor's background is the app's in both modes.
 `src/design/colorscheme.test.ts` fails when a hex value there differs from `index.css` or sits outside the two dictionaries, and when a `terminal-*` colour takes another slot's index; a token change is copied there by hand.
 The font is the host element's computed `font-mono` at `text-sm`: `@theme inline` emits no `--font-mono` variable, so the class is the only place the stack resolves.
+After that stack comes "Symbols Nerd Font Mono", the Nerd Fonts v3.5.1 symbols-only font (MIT, the icon sets' licences in its README), shipped as `src/assets/fonts/symbols-nerd-font/SymbolsNerdFontMono-Regular.woff2`.
+Its `@font-face`, in `src/components/compose/terminal-font.css`, covers the private use areas alone (`U+E000-F8FF`, `U+F0000-FFFFD`, `U+100000-10FFFD`), so it draws the icons editor plugins put there and never a character the mono font has.
+The rest of the app keeps `font-mono` without it.
 
 ## Rules
 
@@ -95,7 +98,7 @@ The font is the host element's computed `font-mono` at `text-sm`: `@theme inline
 - `disabled-foreground` is only the label of an inactive control; text that informs, such as the key help's not-yet-available actions and the milestone badges, is `muted-foreground`.
 - Every focusable shows a solid 2 px `ring` outline on `:focus-visible` (the base layer of `src/index.css`), whatever the component's own ring.
 - Icons are Lucide outline at stroke width 1.75, set once by `LucideProvider` in `src/main.tsx`.
-- Type is Inter when installed, else the system UI stack; no webfont ships (no Inter file exists on the build machine and adding the package needs approval).
+- Type is Inter when installed, else the system UI stack; no webfont ships for it (no Inter file exists on the build machine and adding the package needs approval), and the one font file the app carries is the terminal's symbols font ("Terminal").
 - `prefers-reduced-motion` collapses every animation and transition.
 
 ## Row and notice patterns
