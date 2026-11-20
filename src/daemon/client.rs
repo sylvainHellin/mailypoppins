@@ -489,6 +489,26 @@ pub fn unavailable(why: &str, socket: &Path) -> ! {
     std::process::exit(EXIT_UNAVAILABLE);
 }
 
+/// The exit-4 diagnostic of a command whose daemon went away while it ran:
+/// what was cut off, where the log is, and `next`, what to do about it.
+///
+/// Not [`unavailable`]: a daemon served the command until it went, and one
+/// may be serving again already, as after a restart, so "no daemon could
+/// serve this command" and "start one" would both be false. Running the
+/// command again reaches whichever daemon is up, or starts one.
+pub fn went_away(why: &str, next: &str) -> ! {
+    eprintln!(
+        "{} the mailypoppins daemon went away while this command ran: {why}",
+        "\u{2717}".red()
+    );
+    eprintln!("  daemon log: {}", lifecycle::daemon_log_path().display());
+    eprintln!("  next:       {next}");
+    std::process::exit(EXIT_UNAVAILABLE);
+}
+
+/// The `next` of [`went_away`] for a command that is safe to run twice.
+pub const RUN_AGAIN: &str = "run the command again";
+
 #[cfg(test)]
 mod tests {
     use super::*;

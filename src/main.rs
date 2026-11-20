@@ -2431,7 +2431,7 @@ async fn routed_send_approved(
         Ok(Settled::Failed(message)) => return Err(anyhow!("{message}")),
         Err(_) => {
             drop(batch);
-            daemon_unavailable("the daemon closed the connection with an operation still running")
+            daemon_went_away("the connection closed with an operation still running")
         }
     };
 
@@ -2877,11 +2877,16 @@ async fn await_every_store_open(connection: &mut mp_client::Connection) {
 
 /// The exit-4 diagnostic for a call that got no answer at all, as opposed to a
 /// refusal: `ClientError::Timeout` renders as "<method> went unanswered for
-/// Ns", the sentence this path has always printed, and anything else is the
-/// transport's own words after the method.
+/// Ns", the sentence this path has always printed; a connection that closed
+/// or failed under the call is a daemon that went away while the command ran
+/// ([`daemon_went_away`]); anything else is the transport's own words after
+/// the method.
 fn unanswered(method: &str, error: mp_client::ClientError) -> ! {
     match error {
         e @ mp_client::ClientError::Timeout { .. } => daemon_unavailable(&e.to_string()),
+        e @ (mp_client::ClientError::Closed | mp_client::ClientError::Io(_)) => {
+            daemon_went_away(&format!("{method}: {e}"))
+        }
         e => daemon_unavailable(&format!("{method}: {e}")),
     }
 }
@@ -2903,6 +2908,12 @@ fn refusal(account: &str, error: mp_protocol::RpcError) -> anyhow::Error {
 /// The exit-4 diagnostic of a routed command: why, where, and how to fix it.
 fn daemon_unavailable(why: &str) -> ! {
     mailypoppins::daemon::client::unavailable(why, &mailypoppins::daemon::runtime::socket_path())
+}
+
+/// The exit-4 diagnostic of a routed command whose daemon went away while it
+/// ran, which is safe to run again.
+fn daemon_went_away(why: &str) -> ! {
+    mailypoppins::daemon::client::went_away(why, mailypoppins::daemon::client::RUN_AGAIN)
 }
 
 /// `mp account list`, printed identically whether the entries were built here
@@ -3225,7 +3236,7 @@ async fn fetch_on_miss<T>(
         }
         Err(mp_client::ClientError::Rpc(error)) => return Err(refusal(account, error)),
         Err(mp_client::ClientError::Closed) => {
-            daemon_unavailable("the daemon closed the connection with an operation still running")
+            daemon_went_away("the connection closed with an operation still running")
         }
         Err(e) => unanswered("message.fetch", e),
     };
@@ -3482,9 +3493,7 @@ async fn routed_server_search(
             }
         })
         .await
-        .unwrap_or_else(|_| {
-            daemon_unavailable("the daemon closed the connection with a search still running")
-        });
+        .unwrap_or_else(|_| daemon_went_away("the connection closed with a search still running"));
     let settled: mp_protocol::listing::ServerSearchSettled = match settled {
         Settled::Done(result) => serde_json::from_value(result)
             .context("reading the daemon's message.search_server settle")?,
@@ -4137,9 +4146,7 @@ async fn await_operation(
 ) -> Settled {
     match connection.await_operation(id, on_progress).await {
         Ok(settled) => settled,
-        Err(_) => {
-            daemon_unavailable("the daemon closed the connection with an operation still running")
-        }
+        Err(_) => daemon_went_away("the connection closed with an operation still running"),
     }
 }
 
@@ -5528,9 +5535,7 @@ async fn routed_calendar_freebusy(
     let result = match connection.settle(&started).await {
         Ok(Settled::Done(result)) => result,
         Ok(Settled::Failed(message)) => return Err(anyhow!("{message}")),
-        Err(_) => daemon_unavailable(
-            "the daemon closed the connection before the free/busy query answered",
-        ),
+        Err(_) => daemon_went_away("the connection closed before the free/busy query answered"),
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -5677,9 +5682,10 @@ async fn routed_event_create(account: &str, flags: &CreateFlags, json: bool) -> 
     let result = match connection.settle(&started).await {
         Ok(Settled::Done(result)) => result,
         Ok(Settled::Failed(message)) => return Err(anyhow!("{message}; {rerun}")),
-        Err(_) => daemon_unavailable(&format!(
-            "the daemon closed the connection before the new event was confirmed; {rerun}"
-        )),
+        Err(_) => mailypoppins::daemon::client::went_away(
+            "the connection closed before the new event was confirmed",
+            &rerun,
+        ),
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -6948,7 +6954,7 @@ async fn run_admin_operation(
         Ok(Settled::Failed(message)) => Err(anyhow!("{message}")),
         Err(mp_client::ClientError::Rpc(error)) => Err(refusal(account, error)),
         Err(mp_client::ClientError::Closed) => {
-            daemon_unavailable("the daemon closed the connection with an operation still running")
+            daemon_went_away("the connection closed with an operation still running")
         }
         Err(e) => unanswered(method, e),
     }
@@ -6962,9 +6968,7 @@ async fn settle(
     match connection.settle(started).await {
         Ok(Settled::Done(result)) => Ok(result),
         Ok(Settled::Failed(message)) => Err(anyhow!("{message}")),
-        Err(_) => {
-            daemon_unavailable("the daemon closed the connection with an operation still running")
-        }
+        Err(_) => daemon_went_away("the connection closed with an operation still running"),
     }
 }
 
