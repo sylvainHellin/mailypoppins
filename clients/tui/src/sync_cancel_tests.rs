@@ -415,3 +415,103 @@ fn a_sync_whose_daemon_stopped_and_hung_up_says_the_stop_cut_it_short_once() {
         app.status_log
     );
 }
+
+/// The line a sync whose daemon died without announcing its stop ends with,
+/// the desktop's `Sync of <account> was dropped: <reason>` with the reason its
+/// Rust layer gives a restarted daemon (`clients/desktop/src/app/pending.ts`,
+/// `clients/desktop/src-tauri/src/session.rs`): the two clients word it alike.
+const DROPPED: &str = "Sync of work was dropped: the daemon restarted";
+
+/// Close the connection to the daemon, as the session thread reports it.
+fn lose_the_connection(app: &mut App, daemon: &Daemon) {
+    let (sender, events) = std::sync::mpsc::channel();
+    sender
+        .send(crate::events::Incoming::Disconnected {
+            reason: "socket closed".to_string(),
+        })
+        .expect("the drain has not dropped the stream");
+    crate::events::drain(app, daemon, &events);
+}
+
+/// The snapshot of a daemon other than the one that started the sync.
+fn the_next_daemons_snapshot(app: &mut App) {
+    app.apply_bootstrap(&Bootstrap {
+        instance_id: "the-next-daemon".to_string(),
+        revision: 1,
+        ..Bootstrap::default()
+    });
+}
+
+/// How many lines of the activity log read `message`.
+fn said(app: &App, message: &str) -> usize {
+    app.status_log
+        .iter()
+        .filter(|line| line.message == message)
+        .count()
+}
+
+/// A sync whose daemon died without announcing its stop (a crash, a kill, a
+/// power loss) says it was dropped, in the desktop's words, once the next
+/// daemon's snapshot shows the one that ran it is gone: an error, since the
+/// sync did not finish, and not the cut-short line, since no stop was
+/// announced.
+#[test]
+fn a_sync_whose_daemon_died_unannounced_says_it_was_dropped() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    press(&mut app, &daemon, "sS");
+    lose_the_connection(&mut app, &daemon);
+    the_next_daemons_snapshot(&mut app);
+    assert_eq!(said(&app, DROPPED), 1, "{:?}", app.status_log);
+    assert_eq!(said(&app, CUT), 0, "{:?}", app.status_log);
+    let line = app
+        .status_log
+        .iter()
+        .find(|line| line.message == DROPPED)
+        .expect("the dropped line");
+    assert!(matches!(line.level, StatusLevel::Error), "{:?}", line.level);
+    assert_eq!(app.bg_count, 0, "the spinner comes down");
+}
+
+/// A connection that comes back to the same daemon finds the sync still
+/// running there, so nothing says it was dropped and its end still lands.
+#[test]
+fn a_sync_whose_connection_came_back_to_the_same_daemon_is_not_dropped() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    press(&mut app, &daemon, "sS");
+    lose_the_connection(&mut app, &daemon);
+    app.apply_bootstrap(&Bootstrap {
+        instance_id: INSTANCE.to_string(),
+        revision: 1,
+        ..Bootstrap::default()
+    });
+    assert_eq!(said(&app, DROPPED), 0, "{:?}", app.status_log);
+    assert_eq!(said(&app, CUT), 0, "{:?}", app.status_log);
+    assert_eq!(app.bg_count, 1, "the sync is still awaited");
+}
+
+/// A stop the daemon announced says the stop cut the sync short, once, and
+/// never that it was dropped as well.
+#[test]
+fn a_sync_whose_daemon_announced_its_stop_is_cut_short_and_not_dropped() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    press(&mut app, &daemon, "sS");
+    app.apply_event(&shutting_down(2));
+    lose_the_connection(&mut app, &daemon);
+    the_next_daemons_snapshot(&mut app);
+    assert_eq!(said(&app, CUT), 1, "{:?}", app.status_log);
+    assert_eq!(said(&app, DROPPED), 0, "{:?}", app.status_log);
+}
+
+/// With no sync of this window running, a daemon that died says neither line.
+#[test]
+fn a_daemon_that_died_with_no_sync_running_says_neither_line() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    lose_the_connection(&mut app, &daemon);
+    the_next_daemons_snapshot(&mut app);
+    assert_eq!(said(&app, DROPPED), 0, "{:?}", app.status_log);
+    assert_eq!(said(&app, CUT), 0, "{:?}", app.status_log);
+}
