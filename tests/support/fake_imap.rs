@@ -49,7 +49,9 @@
 //! message to a folder while a session idles on it
 //! ([`RejectingImapServer::deliver`]), which that session is told of with an
 //! untagged `EXISTS` (RFC 2177 3); [`RejectingImapServer::idles`] counts the
-//! IDLEs entered, so a test delivers once the client is listening.
+//! IDLEs entered, so a test delivers once the client is listening. A test can
+//! also send every idling session an answer no client can read and close it
+//! ([`RejectingImapServer::garble_idlers`]).
 //!
 //! A test can make the server refuse any command with a tagged answer of its
 //! own ([`RejectingImapServer::refuse`]), and answer a `SEARCH` the way TUM's
@@ -254,8 +256,9 @@ struct Shared {
     /// it answers, in milliseconds.
     append_delay_ms: AtomicU64,
     /// The sessions in IDLE, each with the folder it has selected and the
-    /// channel that wakes it to report what arrived there.
-    idlers: Mutex<Vec<(String, futures::channel::mpsc::UnboundedSender<()>)>>,
+    /// channel that wakes it, to report what arrived there or to send what
+    /// no client can read.
+    idlers: Mutex<Vec<(String, futures::channel::mpsc::UnboundedSender<Wake>)>>,
     /// How many IDLE commands the server has entered.
     idles: AtomicUsize,
     /// The messages, by UID, a FETCH leaves out, and the tagged answer it
@@ -269,6 +272,14 @@ struct Shared {
     hangups: Mutex<std::collections::HashSet<String>>,
     /// The folder and the command line of every `SEARCH` the server ran.
     searches: Mutex<Vec<(String, String)>>,
+}
+
+/// What wakes a session in IDLE.
+enum Wake {
+    /// Mail arrived in its folder: it reports the folder's new size.
+    Arrived,
+    /// It sends these bytes as they are and closes the connection.
+    Garbled(Vec<u8>),
 }
 
 impl Shared {
@@ -572,10 +583,19 @@ impl RejectingImapServer {
             .expect("the folder is served");
         for (idling, wake) in self.shared.idlers.lock().expect("the idlers").iter() {
             if idling == folder {
-                let _ = wake.unbounded_send(());
+                let _ = wake.unbounded_send(Wake::Arrived);
             }
         }
         uid
+    }
+
+    /// Send `bytes` as they are to every session in IDLE, then close it: an
+    /// answer no IMAP parser reads, as xmail.mwn.de's `Server Unavailable.`
+    /// while it was down (PERSO-323).
+    pub fn garble_idlers(&self, bytes: &[u8]) {
+        for (_, wake) in self.shared.idlers.lock().expect("the idlers").iter() {
+            let _ = wake.unbounded_send(Wake::Garbled(bytes.to_vec()));
+        }
     }
 
     /// Leave the message `uid` out of every later FETCH of bodies that names
@@ -1132,14 +1152,18 @@ async fn serve(
                     // The client sends nothing but DONE while it idles, so a
                     // read dropped for a wake loses nothing.
                     let event = futures::select! {
-                        read = tls.read_line(&mut done).fuse() => Some(read),
-                        _ = woken.next() => None,
+                        read = tls.read_line(&mut done).fuse() => Ok(read),
+                        wake = woken.next() => Err(wake),
                     };
                     match event {
-                        Some(Ok(0)) | Some(Err(_)) => break false,
-                        Some(Ok(_)) if done.trim().eq_ignore_ascii_case("DONE") => break true,
-                        Some(Ok(_)) => {}
-                        None => {
+                        Ok(Ok(0)) | Ok(Err(_)) => break false,
+                        Ok(Ok(_)) if done.trim().eq_ignore_ascii_case("DONE") => break true,
+                        Ok(Ok(_)) => {}
+                        Err(Some(Wake::Garbled(bytes))) => {
+                            reply(&mut tls, &bytes).await?;
+                            break false;
+                        }
+                        Err(_) => {
                             // RFC 2177 3: the new size of the idling folder.
                             let exists = folder
                                 .as_deref()

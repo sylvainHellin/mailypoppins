@@ -159,6 +159,26 @@ mod tests {
         );
     }
 
+    /// An answer async-imap's parser could not read is the server's text, its
+    /// lines joined, rather than the parser's error with its input as byte
+    /// values (PERSO-323): what xmail.mwn.de sent while it was down.
+    #[test]
+    fn an_answer_the_parser_cannot_read_is_the_servers_text() {
+        let input = "Server Unavailable. 15\r\n* BYE Connection closed.\r\n";
+        let bytes: Vec<u8> = input.bytes().collect();
+        // async-imap's own rendering, `src/imap_stream.rs`.
+        let unread = Error::Io(std::io::Error::other(format!(
+            "Error(Error {{ input: {bytes:?}, code: Tag }}) during parsing of {input:?}"
+        )));
+        assert_eq!(
+            server_words(&unread),
+            "the server sent an answer mp cannot read: \
+             \"Server Unavailable. 15 / * BYE Connection closed.\""
+        );
+        let other = Error::Io(std::io::Error::other("connection reset"));
+        assert_eq!(server_words(&other), "io: connection reset");
+    }
+
     /// A parsed code is spelled as on the wire.
     #[test]
     fn a_parsed_code_is_spelled_as_on_the_wire() {

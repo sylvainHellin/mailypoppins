@@ -2069,6 +2069,43 @@ mod wire {
         );
     }
 
+    /// An answer the watcher cannot read is logged in the server's words
+    /// (PERSO-323): xmail.mwn.de, briefly down, sent `Server Unavailable. 15`
+    /// and a `* BYE` to an idling session, and the daemon log printed the
+    /// parser's error twice over, its input as lists of byte values.
+    #[test]
+    fn the_watcher_logs_an_answer_it_cannot_read_in_the_servers_words() {
+        let wire = served();
+        wait_for("the daemon's watcher to idle", || wire.imap.idles() > 0);
+        wire.imap
+            .garble_idlers(b"Server Unavailable. 15\r\n* BYE Connection closed.\r\n");
+
+        let failed = format!("[watcher] watching {ACCOUNT} failed");
+        let mut line = String::new();
+        wait_for("the watcher's failure in the daemon log", || {
+            let logs: String = std::fs::read_dir(wire.root().join("logs"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|file| std::fs::read_to_string(file.path()).ok())
+                .collect();
+            match logs.lines().find(|l| l.contains(&failed)) {
+                Some(found) => {
+                    line = found.to_string();
+                    true
+                }
+                None => false,
+            }
+        });
+        assert!(
+            line.ends_with(
+                "failed (1 in a row): the server sent an answer mp cannot read: \
+                 \"Server Unavailable. 15 / * BYE Connection closed.\""
+            ),
+            "{line}"
+        );
+    }
+
     /// `mp watch --timeout 1` on a mailbox nothing arrives in gives up after
     /// a second and exits 2, the code plan section 3.0 reserved for it.
     #[test]
