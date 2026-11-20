@@ -165,6 +165,7 @@ All notable changes to this project are documented in this file.
 - `mp config set-password` without `imap` or `smtp` prompts once and stores the password for both logins, a Graph account is pointed to `mp config oauth2-login`, health, the TUI and a held change or send name that command when the account uses one password, the desktop app offers Set password for both, and a set-password that fails on a full or read-only disk leaves the passwords as they were or says which one is stored (PERSO-297).
 
 ### Fixed
+- A hook's payload and `MP_HOOK_SELECTOR`, a reply's or forward's source, a sent draft's sent copy, an invitation event's source, `message.fetch` and a restored row name their own copy, UID included, when the mailbox holds a second copy of the message, as `mp show` does (PERSO-340).
 - The TUI says "Sync of <account> was dropped: the daemon restarted", as the desktop does, when a sync it started died with a daemon that never announced its stop, once the next daemon connects; before, only a log line recorded it (PERSO-341).
 - A sync that joined one already running prints that sync's outcome in `mp sync`, the TUI and the desktop app, where it printed nothing and `mp sync` exited 0.
 - A sync cut short by `mp daemon stop` or `restart` says "Sync of <account> cut short by the daemon stopping" in every client, at once in `mp sync` and the TUI and in the desktop when it reconnects to the next daemon, whether it ended cancelled, failed or without its end, and `mp sync` (with `--full` too) exits 1.
