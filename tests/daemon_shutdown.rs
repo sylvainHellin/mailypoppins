@@ -38,7 +38,7 @@
 //!
 //! mp daemon stop [--grace-secs N] [--timeout-secs N]
 //!     clean:    "\u{2713} daemon stopped"
-//!     unclean:  "\u{2717} daemon stopped, {n} operation[s] did not settle within {g}s"
+//!     unclean:  "\u{26a0} daemon stopped, {n} operation[s] did not settle within {g}s"
 //!               followed by one "  {method} ({operation_id})" per unsettled operation.
 //!     Exit 0 either way: the daemon did stop, which is what was asked.
 //! ```
@@ -887,6 +887,9 @@ fn an_operation_that_finishes_inside_the_grace_stops_cleanly() {
 /// user who has to read a paragraph to learn which sync was killed will not
 /// read it.
 ///
+/// The sign is a warning, not a cross (PERSO-322): the stop worked, and in a
+/// `mp daemon restart` a cross above the start's tick read as a failed restart.
+///
 /// Exit 0: the daemon stopped, which is what was asked. A nonzero code here
 /// would make `mp daemon restart` refuse to start the replacement, and would
 /// turn "a sync was still running" into a failure of the command that
@@ -912,7 +915,7 @@ fn an_operation_the_grace_does_not_outlast_is_named_by_mp_daemon_stop() {
     assert_eq!(
         stdout_lines(&out),
         vec![
-            "\u{2717} daemon stopped, 1 operation did not settle within 1s".to_string(),
+            "\u{26a0} daemon stopped, 1 operation did not settle within 1s".to_string(),
             format!("  test.operation ({operation})"),
         ],
         "the command names what prevented a clean stop, one line each; stdout: {}",
