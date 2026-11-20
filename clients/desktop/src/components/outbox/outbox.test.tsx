@@ -18,6 +18,8 @@ function row(id: number, patch: Partial<OutboxRow> = {}): OutboxRow {
     rejected: [],
     outstanding: ["robin@example.com"],
     may_be_delivered: true,
+    discarded: false,
+    discard_keeps_version: false,
     ...patch,
   };
 }
@@ -135,6 +137,23 @@ describe("the outbox view", () => {
     const area = screen.getByRole("region", { name: "Activity" });
     await waitFor(() => expect(area).toHaveTextContent("Outbox row 5 sent; 1 Sent copy filed"));
     await waitFor(() => expect(rowEl(5)).toBeNull());
+  });
+
+  // PERSO-308: a discarded row a store rebuild parked in failed is never sent again, so it shows no Retry, and R names why.
+  it("a discarded row shows no Retry, and R names why and asks nothing", async () => {
+    const { user } = renderApp(1400, () => {
+      mock.outbox.work = { ever_used: true, rows: [row(5, { discarded: true })] };
+    });
+    await shellReady();
+    await user.keyboard("go");
+    await view("work");
+    await waitFor(() => expect(rowEl(5)).not.toBeNull());
+    expect(within(rowEl(5)).queryByRole("button", { name: /Retry/ })).toBeNull();
+    expect(within(rowEl(5)).getByRole("button", { name: "Discard row 5" })).toBeInTheDocument();
+    await user.keyboard("R");
+    expect(await screen.findByText(/Row 5 was discarded, so it is not sent again/)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(callsOf("outbox_retry")).toEqual([]);
   });
 
   it("R on a row the daemon will not retry names why and asks nothing", async () => {

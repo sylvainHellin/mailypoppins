@@ -1699,9 +1699,7 @@ fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result
     let raw = blobs
         .read(&row.raw_blob)
         .with_context(|| format!("reading outbox row {} before its discard", row.id))?;
-    let carries_a_version = crate::calendar::itip_of_message(&raw)
-        .is_some_and(|itip| matches!(itip.method.as_deref(), Some("REQUEST" | "CANCEL")));
-    if !carries_a_version {
+    if !carries_a_version(&raw) {
         return Ok(false);
     }
     ingest_sent_copy(
@@ -1720,6 +1718,28 @@ fn keep_the_version(store: &Store, blobs: &BlobStore, row: &OutboxRow) -> Result
         )
     })?;
     Ok(true)
+}
+
+/// Whether `raw` is a version of an invitation: an iMIP `REQUEST` or
+/// `CANCEL`, which the organizer's agenda and the next `SEQUENCE` are built
+/// on (PERSO-204).
+fn carries_a_version(raw: &[u8]) -> bool {
+    crate::calendar::itip_of_message(raw)
+        .is_some_and(|itip| matches!(itip.method.as_deref(), Some("REQUEST" | "CANCEL")))
+}
+
+/// Whether a [`discard`] of `row` would keep the invitation version it
+/// carries ([`keep_the_version`]), which is what the outbox listing tells
+/// a client before it asks (PERSO-308): the row is not discarded already,
+/// some recipient may hold it, and its bytes are an invitation version.
+pub fn discard_keeps_version(blobs: &BlobStore, row: &OutboxRow) -> Result<bool> {
+    if row.is_discarded() || !someone_may_hold(row) {
+        return Ok(false);
+    }
+    let raw = blobs
+        .read(&row.raw_blob)
+        .with_context(|| format!("reading outbox row {}", row.id))?;
+    Ok(carries_a_version(&raw))
 }
 
 /// File again, from its own bytes, the local Sent copy of every row of
@@ -2658,6 +2678,39 @@ mod tests {
             1
         );
         assert!(blobs.contains(&hash));
+    }
+
+    /// PERSO-308: the listing says a discard keeps the version of a sent
+    /// invitation, as the discard itself then does, and not of a plain mail,
+    /// of a version nobody can hold, or of a row discarded already.
+    #[test]
+    fn a_discard_keeps_the_version_of_an_invitation_someone_may_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = invitation_raw("<keeps-1@example.com>");
+        let (store, blobs, id, _) = appending(dir.path(), &raw);
+        let sent = load(&store, id).unwrap().unwrap();
+        assert!(discard_keeps_version(&blobs, &sent).unwrap());
+
+        let never_submitted = OutboxRow {
+            state: OutboxState::PendingSend,
+            submission_started_at: None,
+            ..sent.clone()
+        };
+        assert!(!discard_keeps_version(&blobs, &never_submitted).unwrap());
+        let mut discarded = sent.clone();
+        discarded.state = OutboxState::Failed;
+        discarded.envelope.as_mut().unwrap().discarded = Some(1);
+        assert!(!discard_keeps_version(&blobs, &discarded).unwrap());
+
+        assert!(discard_loaded(&store, &blobs, sent, false).unwrap());
+        assert!(load(&store, id).unwrap().unwrap().is_filing());
+
+        let other = tempfile::tempdir().unwrap();
+        let plain = b"From: alice@example.com\r\nTo: bob@example.com\r\n\
+                      Message-ID: <keeps-2@example.com>\r\nSubject: hi\r\n\r\nbody\r\n";
+        let (store, blobs, id, _) = appending(other.path(), plain);
+        let row = load(&store, id).unwrap().unwrap();
+        assert!(!discard_keeps_version(&blobs, &row).unwrap());
     }
 
     /// The same race on a plain mail: the discard deletes the row the drain

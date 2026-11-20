@@ -415,6 +415,11 @@ fn outbox_row_lines(row: &OutboxRow) -> Vec<String> {
     if row.never_submitted {
         lines.push("        never submitted; the next sync sends it".to_string());
     }
+    if row.discarded {
+        lines.push(
+            "        discarded already: never sent again; discard it to remove it".to_string(),
+        );
+    }
     for (address, reason) in &row.rejected {
         lines.push(format!("        never delivered to: {address} ({reason})"));
     }
@@ -460,12 +465,36 @@ pub fn outbox_discard_line(row_id: i64, message_id: &str) -> String {
     format!("  \u{2713} discarded row {row_id} ({message_id}); its bytes are released")
 }
 
+/// The line `mp outbox discard` prints for the row the listing showed as
+/// `listed`, when it showed it.
+///
+/// A row whose invitation version the discard keeps (PERSO-308) keeps its
+/// bytes for the copy, so it says where that copy is instead of that they
+/// are released; every other row, and one the listing did not show, reads
+/// [`outbox_discard_line`].
+pub fn outbox_discarded_line(row_id: i64, message_id: &str, listed: Option<&OutboxRow>) -> String {
+    let Some(row) = listed.filter(|row| row.discard_keeps_version) else {
+        return outbox_discard_line(row_id, message_id);
+    };
+    let copy = match row.target_mailbox.as_deref() {
+        Some(target) => format!(", and its copy still goes to {target}"),
+        None => ", its copy in this machine's Sent mailbox".to_string(),
+    };
+    format!(
+        "  \u{2713} discarded row {row_id} ({message_id}); its invitation version stays on the \
+         agenda{copy}"
+    )
+}
+
 /// The line `mp outbox retry` prints before it sends `row` again, `None`
 /// when a retry cannot deliver it twice (PERSO-330). The daemon decides
 /// ([`OutboxRow::may_be_delivered`]), so the server's own words in the
 /// row's reason never do.
+///
+/// A row the user discarded already is never sent again (PERSO-308): the
+/// daemon refuses its retry, so nothing warns about delivering it twice.
 pub fn outbox_retry_warning(row: &OutboxRow) -> Option<String> {
-    (row.state == "failed" && row.may_be_delivered).then(|| {
+    (row.state == "failed" && row.may_be_delivered && !row.discarded).then(|| {
         format!(
             "  \u{26a0} row {} may already have been delivered: mp cannot know whether the server \
              took it, so its recipients may get it twice",
@@ -1386,6 +1415,8 @@ mod tests {
             rejected: Vec::new(),
             outstanding: vec!["bob@example.com".to_string()],
             may_be_delivered,
+            discarded: false,
+            discard_keeps_version: false,
         }
     }
 
@@ -1407,6 +1438,66 @@ mod tests {
             ..failed_row(true)
         };
         assert_eq!(outbox_retry_warning(&filing), None);
+    }
+
+    /// PERSO-308: a row the user discarded already is never sent again, so
+    /// `mp outbox retry` prints no warning about delivering it twice before
+    /// the daemon refuses it, and `mp outbox list` says what is left to do
+    /// with it.
+    #[test]
+    fn a_discarded_row_warns_of_no_second_delivery_and_lists_as_discarded() {
+        use super::{outbox_retry_warning, outbox_row_lines};
+        let discarded = mp_protocol::send::OutboxRow {
+            discarded: true,
+            ..failed_row(true)
+        };
+        assert_eq!(outbox_retry_warning(&discarded), None);
+        let lines = outbox_row_lines(&discarded);
+        assert!(
+            lines.contains(
+                &"        discarded already: never sent again; discard it to remove it".to_string()
+            ),
+            "{lines:#?}"
+        );
+        assert!(!outbox_row_lines(&failed_row(true))
+            .iter()
+            .any(|line| line.contains("discarded")));
+    }
+
+    /// PERSO-308: `mp outbox discard` of a row whose invitation version the
+    /// discard keeps says it is kept, and where its copy goes, instead of
+    /// that its bytes are released.
+    #[test]
+    fn a_discard_that_keeps_an_invitation_version_says_so() {
+        use super::outbox_discarded_line;
+        let plain = failed_row(true);
+        assert_eq!(
+            outbox_discarded_line(7, "<m@example.com>", Some(&plain)),
+            "  \u{2713} discarded row 7 (<m@example.com>); its bytes are released"
+        );
+        assert_eq!(
+            outbox_discarded_line(7, "<m@example.com>", None),
+            "  \u{2713} discarded row 7 (<m@example.com>); its bytes are released"
+        );
+        let invitation = mp_protocol::send::OutboxRow {
+            state: "sent_pending_append".to_string(),
+            discard_keeps_version: true,
+            ..failed_row(false)
+        };
+        assert_eq!(
+            outbox_discarded_line(7, "<m@example.com>", Some(&invitation)),
+            "  \u{2713} discarded row 7 (<m@example.com>); its invitation version stays on the \
+             agenda, and its copy still goes to Sent"
+        );
+        let local = mp_protocol::send::OutboxRow {
+            target_mailbox: None,
+            ..invitation
+        };
+        assert_eq!(
+            outbox_discarded_line(7, "<m@example.com>", Some(&local)),
+            "  \u{2713} discarded row 7 (<m@example.com>); its invitation version stays on the \
+             agenda, its copy in this machine's Sent mailbox"
+        );
     }
 
     /// A row from a daemon that predates the field reads as one that may

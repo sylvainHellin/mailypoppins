@@ -25,6 +25,8 @@ function row(id: number, patch: Partial<OutboxRow> = {}): OutboxRow {
     rejected: [],
     outstanding: ["robin@example.com"],
     may_be_delivered: true,
+    discarded: false,
+    discard_keeps_version: false,
     ...patch,
   };
 }
@@ -238,6 +240,24 @@ describe("the confirmations and the words", () => {
     expect(warning(row(5, { state: "done", partial: true }))).toMatch(/went to some recipients/);
     expect(warning(row(5, { state: "done", partial: false }))).toMatch(/only in this machine's Sent mailbox/);
     expect(stateLabel(row(5, { state: "done", partial: false }))).toBe("Copy only on this machine");
+  });
+
+  // PERSO-308: the daemon says which rows the user discarded already and which discards keep an invitation version.
+  it("retries no discarded row, and names what a discard keeps of an invitation and of a discarded row", () => {
+    const discarded = row(5, { discarded: true });
+    expect(retryDialog("work", discarded)).toBe("Row 5 was discarded, so it is not sent again; discard it to remove it");
+    const warning = (r: OutboxRow) => (discardDialog("work", r) as { warning: string }).warning;
+    expect(warning(discarded)).toBe("It was discarded already; discarding it again removes it, and its copy stays only in this machine's Sent mailbox.");
+    expect(warning(row(6, { state: "sent_pending_append", discard_keeps_version: true }))).toBe(
+      "It was delivered; discarding it keeps its invitation version on the agenda, and its copy still goes to Sent.",
+    );
+    expect(warning(row(7, { state: "sent_pending_append" }))).toBe("It was delivered; discarding it gives up its copy in Sent.");
+    // An older daemon sends neither field: the row reads as before.
+    const older: Partial<OutboxRow> = row(8, { state: "sent_pending_append" });
+    delete older.discarded;
+    delete older.discard_keeps_version;
+    expect(warning(older as OutboxRow)).toBe("It was delivered; discarding it gives up its copy in Sent.");
+    expect(retryDialog("work", older as OutboxRow)).toMatchObject({ title: "File the Sent copy of row 8?" });
   });
 
   it("says a retry's outcome in each of the row's ends", () => {

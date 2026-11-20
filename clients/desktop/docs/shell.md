@@ -563,12 +563,12 @@ A partly delivered row never reads as a failure (`SND-08`): its chip, its label 
 
 ### Retry and discard
 
-Retry shows only on the two states the daemon retries, and Discard on every row; `R` and `d` act on the row under the view's cursor.
+Retry shows only on the two states the daemon retries, never on a row the listing marks `discarded` (one discarded already, listed again because a store rebuild parked it or its copy was given up, which is never sent again, PERSO-308), and Discard on every row; `R` and `d` act on the row under the view's cursor.
 Both ask first, in the archive and delete confirmation, which then carries a warning line:
 
 - Retry of a `failed` row: "Send row N again?", warning that a failed submission may already have been delivered, so its recipients could get it twice (`mp outbox retry`'s "only after checking it did not arrive").
 - Retry of a `sent_pending_append` row: "File the Sent copy of row N?", with no warning, since the daemon searches for the copy before it appends one.
-- Discard: "Discard row N?", warning what the row gives up: a failed or submitted row "ended without a verdict, so it may already have been delivered", a never-submitted row is never sent, a `sent_pending_append` row gives up its Sent copy, and a partial row drops the note of who never got it.
+- Discard: "Discard row N?", warning what the row gives up: a failed or submitted row "ended without a verdict, so it may already have been delivered", a never-submitted row is never sent, a `sent_pending_append` row gives up its Sent copy, unless the listing says `discard_keeps_version` (a sent invitation, whose discard keeps its version on the agenda and its copy still goes to Sent, PERSO-308), a partial row drops the note of who never got it, and a row discarded already is removed, its copy staying only in this machine's Sent mailbox.
 
 `R` on a row the daemon does not retry names why and asks nothing.
 A confirmed retry calls `outbox_retry`; the row says "Retrying…" and is `aria-busy` until the operation ends, and the end is a notice: "Outbox row N sent" (with "; its Sent copy is filed" when one was), "failed again", "partly delivered", "sent; its Sent copy is still owed", or "is queued again".

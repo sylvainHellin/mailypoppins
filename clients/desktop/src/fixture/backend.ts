@@ -176,6 +176,8 @@ function seedOutbox(): Record<string, { ever_used: boolean; rows: OutboxRow[] }>
         rejected: [],
         outstanding: ["friend@example.com"],
         may_be_delivered: false,
+        discarded: false,
+        discard_keeps_version: false,
       })),
     };
   }
@@ -944,6 +946,9 @@ export function settleRsvp(opts: { fail?: boolean; delivered?: boolean; operatio
       rejected: [],
       outstanding: [e?.organizer ?? server?.organizer?.email ?? ""],
       may_be_delivered: true,
+      discarded: false,
+      // A reply is no invitation version: its discard keeps nothing.
+      discard_keeps_version: false,
     });
     emitEnvelope("state.invalidate", { resource: `outbox:${run.account}`, scope: { query: "counts" } });
     emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "failed", error: { code: -32603, message: SEND_FAIL_REASON } });

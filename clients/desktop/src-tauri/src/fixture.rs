@@ -3412,6 +3412,8 @@ impl State {
                     rejected: Vec::new(),
                     outstanding: vec!["friend@example.com".into()],
                     may_be_delivered: false,
+                    discarded: false,
+                    discard_keeps_version: false,
                 });
             }
         }
@@ -3645,6 +3647,8 @@ impl State {
             rejected: Vec::new(),
             outstanding: Vec::new(),
             may_be_delivered: false,
+            discarded: false,
+            discard_keeps_version: false,
         };
         let mut sent_copy = SentCopy::Filed;
         match simulation {
@@ -6279,6 +6283,9 @@ impl Fixture {
                 rejected: Vec::new(),
                 outstanding: vec![organizer],
                 may_be_delivered: true,
+                discarded: false,
+                // A reply is no invitation version: its discard keeps nothing.
+                discard_keeps_version: false,
             };
             let outbox = s.outbox.entry(account.clone()).or_default();
             outbox.ever_used = true;
@@ -6418,6 +6425,9 @@ impl Fixture {
                 rejected: Vec::new(),
                 outstanding: recipients.iter().map(|r| r.address.clone()).collect(),
                 may_be_delivered: true,
+                discarded: false,
+                // An invitation some attendee may hold: its discard keeps the version.
+                discard_keeps_version: true,
             };
             let outbox = s.outbox.entry(account.clone()).or_default();
             outbox.ever_used = true;

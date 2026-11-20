@@ -38,9 +38,12 @@ function mayDeliverTwice(row: OutboxRow): boolean {
   return (row as Partial<OutboxRow>).may_be_delivered !== false;
 }
 
-/** Whether the daemon admits a retry of a row in this state (`send.outbox_retry`). */
+/**
+ * Whether the daemon admits a retry of the row (`send.outbox_retry`): one in a state it retries, and not one the user discarded
+ * already, which is never sent again (PERSO-308). An older daemon sends no `discarded`, and its row reads as before.
+ */
 export function retryable(row: OutboxRow): boolean {
-  return row.state === "failed" || row.state === "sent_pending_append";
+  return (row.state === "failed" || row.state === "sent_pending_append") && !row.discarded;
 }
 
 /**
@@ -294,10 +297,15 @@ export function selectOutboxRow(s: AppState, rowId: number): AppState {
 
 /** Why a row may already have done what a discard or a retry is about, or null. */
 function discardWarning(row: OutboxRow): string | null {
+  // Listed again after a discard because its copy was given up or a store rebuild parked it (PERSO-308).
+  if (row.discarded) return "It was discarded already; discarding it again removes it, and its copy stays only in this machine's Sent mailbox.";
   if (row.partial) return "It went to some recipients; discarding it drops the note of who never got it.";
   if (row.state === "done") return "Its copy is only in this machine's Sent mailbox; discarding it drops the note, and the copy stays.";
   if (row.state === "sent_pending_append") {
-    return `It was delivered; discarding it gives up its copy in ${row.target_mailbox ?? "the Sent mailbox"}.`;
+    const sent = row.target_mailbox ?? "the Sent mailbox";
+    // A sent invitation's discard keeps its version, and its copy still goes to Sent (PERSO-304, PERSO-308).
+    if (row.discard_keeps_version) return `It was delivered; discarding it keeps its invitation version on the agenda, and its copy still goes to ${sent}.`;
+    return `It was delivered; discarding it gives up its copy in ${sent}.`;
   }
   if (row.never_submitted) return "It was never submitted; discarding it means it is never sent.";
   return "It ended without a verdict, so it may already have been delivered.";
@@ -305,6 +313,7 @@ function discardWarning(row: OutboxRow): string | null {
 
 /** The confirmation of a retry, or why the row cannot be retried. */
 export function retryDialog(account: string, row: OutboxRow): MutationDialog | string {
+  if (row.discarded) return `Row ${row.id} was discarded, so it is not sent again; discard it to remove it`;
   if (!retryable(row)) {
     return `Only a failed row, or one whose Sent copy is owed, can be retried; row ${row.id} is ${stateLabel(row).toLowerCase()}`;
   }

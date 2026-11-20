@@ -142,6 +142,21 @@ pub struct OutboxRow {
     /// an older daemon, which reads as `true`: a client warns as it did.
     #[serde(default = "absent_may_be_delivered")]
     pub may_be_delivered: bool,
+    /// Whether the user discarded the row already (PERSO-308): it is listed
+    /// again only because it ended otherwise, its copy given up or the row
+    /// parked by a store rebuild, and it is never sent again, so
+    /// `send.outbox_retry` refuses it and `send.outbox_discard` removes it.
+    /// Absent from an older daemon, which reads as `false`.
+    #[serde(default)]
+    pub discarded: bool,
+    /// Whether `send.outbox_discard` of this row keeps the invitation version
+    /// it carries (PERSO-204, PERSO-308): an iMIP `REQUEST` or `CANCEL` some
+    /// recipient may hold, whose copy the discard files in the Sent mailbox,
+    /// on the server too where the account files its own copies, so the
+    /// version stays on the organizer's agenda and the bytes are not
+    /// released. Absent from an older daemon, which reads as `false`.
+    #[serde(default)]
+    pub discard_keeps_version: bool,
 }
 
 /// What an older daemon's row, which carries no `may_be_delivered`, reads as.

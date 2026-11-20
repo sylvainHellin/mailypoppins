@@ -2018,9 +2018,10 @@ async fn cmd_outbox(
             )
             .await
             .map_err(|e| refusal(account, e))?;
-            print_lines(&[mp_client::format::outbox_discard_line(
+            print_lines(&[mp_client::format::outbox_discarded_line(
                 id,
                 wire_str(&result["message_id"]),
+                listing.rows.iter().find(|row| row.id == id),
             )]);
         }
         OutboxAction::Retry { id } => {

@@ -656,12 +656,25 @@ fn listing(account: &str) -> Result<OutboxListing, RpcError> {
         });
     }
     let store = crate::store::Store::open(&path).map_err(|e| server_error(account, &e))?;
-    let rows = outbox::unfinished_rows(&store, account).map_err(|e| server_error(account, &e))?;
-    let counts = outbox::counts(&store, account).map_err(|e| server_error(account, &e))?;
+    let blobs = crate::store::BlobStore::for_account(account);
+    listing_in(&store, &blobs, account)
+}
+
+/// [`listing`] against an open store.
+fn listing_in(
+    store: &crate::store::Store,
+    blobs: &crate::store::BlobStore,
+    account: &str,
+) -> Result<OutboxListing, RpcError> {
+    let rows = outbox::unfinished_rows(store, account).map_err(|e| server_error(account, &e))?;
+    let counts = outbox::counts(store, account).map_err(|e| server_error(account, &e))?;
     Ok(OutboxListing {
         account: account.to_string(),
         ever_used: true,
-        rows: rows.iter().map(listed_row).collect(),
+        rows: rows
+            .iter()
+            .map(|row| listed_row(row, keeps_version(blobs, account, row)))
+            .collect(),
         counts: OutboxCounts {
             open: counts.open,
             failed: counts.failed,
@@ -670,8 +683,23 @@ fn listing(account: &str) -> Result<OutboxListing, RpcError> {
     })
 }
 
-/// One row as the listing carries it.
-fn listed_row(row: &crate::outbox::OutboxRow) -> OutboxRow {
+/// Whether a discard of `row` keeps its invitation version
+/// ([`outbox::discard_keeps_version`]); a row whose bytes cannot be read
+/// says it does not, logged, rather than fail the whole listing.
+fn keeps_version(
+    blobs: &crate::store::BlobStore,
+    account: &str,
+    row: &crate::outbox::OutboxRow,
+) -> bool {
+    outbox::discard_keeps_version(blobs, row).unwrap_or_else(|e| {
+        log::warn!("[outbox] {account}: {e:#}; listing it as a row a discard keeps nothing of");
+        false
+    })
+}
+
+/// One row as the listing carries it, `discard_keeps_version` as
+/// [`outbox::discard_keeps_version`] read it from the row's bytes.
+fn listed_row(row: &crate::outbox::OutboxRow, discard_keeps_version: bool) -> OutboxRow {
     // A `done` row is only listed when it kept a note, which is what a partial
     // delivery leaves behind (#0063): calling that `done` would bury the
     // recipient who never got it. A discarded row given up on keeps a note
@@ -704,6 +732,8 @@ fn listed_row(row: &crate::outbox::OutboxRow) -> OutboxRow {
             })
             .unwrap_or_default(),
         may_be_delivered: row.may_be_delivered(),
+        discarded: row.is_discarded(),
+        discard_keeps_version,
     }
 }
 
@@ -1317,10 +1347,69 @@ mod tests {
                 ..Default::default()
             }),
         };
-        assert!(listed_row(&row(None)).partial);
-        let given_up = listed_row(&row(Some(1)));
+        assert!(listed_row(&row(None), false).partial);
+        let given_up = listed_row(&row(Some(1)), false);
         assert!(!given_up.partial);
         assert_eq!(given_up.last_error.as_deref(), Some("the note"));
+    }
+
+    /// PERSO-308: a listed row says whether the user discarded it already,
+    /// which a retry refuses, and whether a discard keeps the invitation
+    /// version it carries: a sent invitation's does, a plain mail's not.
+    #[test]
+    fn a_listed_row_says_whether_it_was_discarded_and_what_a_discard_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = crate::store::BlobStore::new(dir.path().join("blobs"));
+        let envelope = outbox::Envelope {
+            from: "alice@example.com".to_string(),
+            recipients: vec![(
+                "bob@example.com".to_string(),
+                crate::send::RecipientRole::To,
+            )],
+            ..Default::default()
+        };
+        let sent = |message_id: &str, raw: &[u8]| {
+            let id = outbox::enqueue(
+                &store,
+                &blobs,
+                "acct",
+                Some("Sent"),
+                message_id,
+                raw,
+                &envelope,
+            )
+            .unwrap();
+            outbox::record_submission(&store, &blobs, id, &outbox::SubmitOutcome::Accepted)
+                .unwrap();
+            id
+        };
+        let invitation = sent(
+            "<invite@example.com>",
+            b"From: alice@example.com\r\nTo: bob@example.com\r\nSubject: Review\r\n\
+              Message-ID: <invite@example.com>\r\nMIME-Version: 1.0\r\n\
+              Content-Type: text/calendar; method=REQUEST; charset=UTF-8\r\n\r\n\
+              BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nMETHOD:REQUEST\r\n\
+              BEGIN:VEVENT\r\nUID:review@example.com\r\nSEQUENCE:1\r\n\
+              DTSTAMP:20240101T120000Z\r\nDTSTART:20240110T090000Z\r\n\
+              ORGANIZER:mailto:alice@example.com\r\nATTENDEE:mailto:bob@example.com\r\n\
+              END:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let plain = sent(
+            "<plain@example.com>",
+            b"From: alice@example.com\r\nTo: bob@example.com\r\n\
+              Message-ID: <plain@example.com>\r\nSubject: hi\r\n\r\nbody\r\n",
+        );
+        let listed = listing_in(&store, &blobs, "acct").unwrap();
+        let row = |id: i64| listed.rows.iter().find(|row| row.id == id).unwrap();
+        assert!(row(invitation).discard_keeps_version);
+        assert!(!row(plain).discard_keeps_version);
+        assert!(!row(invitation).discarded && !row(plain).discarded);
+
+        let mut discarded = outbox::load(&store, plain).unwrap().unwrap();
+        discarded.state = OutboxState::Failed;
+        discarded.envelope.as_mut().unwrap().discarded = Some(1);
+        assert!(listed_row(&discarded, false).discarded);
     }
 
     /// PERSO-330: the listing carries the outbox's own answer to whether a
@@ -1349,8 +1438,8 @@ mod tests {
                 ..Default::default()
             }),
         };
-        assert!(listed_row(&row(Vec::new())).may_be_delivered);
-        assert!(!listed_row(&row(vec!["bob@x".into()])).may_be_delivered);
+        assert!(listed_row(&row(Vec::new()), false).may_be_delivered);
+        assert!(!listed_row(&row(vec!["bob@x".into()]), false).may_be_delivered);
     }
 
     /// The array is the family, in method-name order, and every one of it is
