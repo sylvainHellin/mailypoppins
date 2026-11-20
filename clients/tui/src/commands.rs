@@ -672,8 +672,9 @@ fn cancel_syncs(app: &mut App, commands: &dyn Queries) {
 /// The three client-side checks stay ahead of the call, each because its
 /// sentence belongs to the key and not to `mp`: the gate that parks a pass
 /// behind the one already running, the transport check whose refusal the daemon
-/// words for `mp sync`, and the progress line, which still says "(Graph)"
-/// because that is what the user reads while it runs.
+/// words for `mp sync`, and the progress line ([`pass_progress`]), which names
+/// the account and says "Graph" because that is what the user reads while it
+/// runs.
 fn start_pass(app: &mut App, commands: &dyn Queries, method: &str, label: &str, action: Action) {
     if super::actions::sync_is_blocked(app) {
         return super::actions::park_until_idle(app, action, label);
@@ -696,13 +697,22 @@ fn start_pass(app: &mut App, commands: &dyn Queries, method: &str, label: &str, 
             account: account.clone(),
         }
     };
-    let progress = if app.is_graph() {
-        format!("{label} (Graph)...")
-    } else {
-        format!("{label}...")
-    };
-    app.set_status_level(progress, StatusLevel::Progress);
+    app.set_status_level(
+        pass_progress(label, &account, app.is_graph()),
+        StatusLevel::Progress,
+    );
     start_operation(app, commands, method, json!({"account": account}), awaited);
+}
+
+/// The progress line of a pass over `account`: `Quick sync (work)...`,
+/// with `, Graph` after the name on a Graph account, whichever key or the
+/// startup fetch started it.
+fn pass_progress(label: &str, account: &str, graph: bool) -> String {
+    if graph {
+        format!("{label} ({account}, Graph)...")
+    } else {
+        format!("{label} ({account})...")
+    }
 }
 
 /// The startup auto-fetch's per-account quick pass (#0001).
@@ -724,11 +734,7 @@ fn start_account_pass(app: &mut App, commands: &dyn Queries, index: usize) {
     }
     let name = account.account_config.name.clone();
     app.set_status_level(
-        if graph {
-            format!("Quick sync ({name}, Graph)...")
-        } else {
-            format!("Quick sync ({name})...")
-        },
+        pass_progress("Quick sync", &name, graph),
         StatusLevel::Progress,
     );
     start_operation(
