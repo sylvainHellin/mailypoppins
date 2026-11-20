@@ -536,9 +536,10 @@ impl DaemonState {
 /// stamps it with a fresh revision and fans it out to every bootstrapped
 /// connection without reducing anything into the snapshot.
 ///
-/// `None` for an account with no live runtime. A blocked tick and a joined one
-/// carry no outcome and commit nothing: the first ran no engine, and the second
-/// is reporting a tick whose runner commits it once.
+/// `None` for an account with no live runtime. A blocked tick carries no
+/// outcome and commits nothing, since it ran no engine; a joined one carries
+/// the outcome of the tick it joined, for its caller to report, and commits
+/// nothing either, since that tick's runner commits it once.
 pub async fn tick_and_commit(
     runtimes: &RuntimeTable,
     canonical: &CanonicalState,
@@ -557,10 +558,9 @@ pub async fn tick_and_commit(
 ///
 /// A call that joined a tick already running and is cancelled while it waits
 /// stops that tick too (PERSO-321, see [`AccountRuntime::tick_until`]); it
-/// carries no outcome to commit either way, and the tick's own runner commits
-/// it, unless the tick was stopped ([`commit_outcome`]). `limit` is the
-/// bound a quick tick this call runs takes (`mp sync -n`), `None` for the
-/// usual one.
+/// commits nothing either way, and the tick's own runner commits it, unless
+/// the tick was stopped ([`commit_outcome`]). `limit` is the bound a quick
+/// tick this call runs takes (`mp sync -n`), `None` for the usual one.
 pub async fn tick_and_commit_until(
     runtimes: &RuntimeTable,
     canonical: &CanonicalState,
@@ -607,9 +607,16 @@ pub async fn commit_tick(
 /// (PERSO-321): it is a cancelled sync, which leaves the account's
 /// `sync_health` as it was, and the counts it moved are announced by the
 /// cancelled pass (PERSO-133) and by the watcher's and the scheduler's
-/// [`tick_and_publish`](super::runtime::publish::tick_and_publish).
+/// [`tick_and_publish`](super::runtime::publish::tick_and_publish). A joiner
+/// publishes none either: it carries the outcome of a tick whose runner
+/// publishes it, and two commits for one tick would be two facts where there
+/// was one.
 fn commit_outcome(canonical: &CanonicalState, account: &str, outcome: &TickOutcome) {
-    if let Some(sync) = outcome.sync.clone().filter(|_| !outcome.stopped) {
+    if let Some(sync) = outcome
+        .sync
+        .clone()
+        .filter(|_| !outcome.stopped && !outcome.joined)
+    {
         canonical.apply(Change::SyncCompleted(sync));
     }
     publish_contacts(canonical, account, outcome);

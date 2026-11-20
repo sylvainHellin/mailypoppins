@@ -2195,10 +2195,11 @@ mod wire {
     }
 
     /// A bounded `mp sync` that arrives while a tick with the usual bound
-    /// runs joins that tick rather than running a second pass beside it.
+    /// runs joins that tick rather than running a second pass beside it, and
+    /// prints that tick's summary, as the `mp sync` that ran it does.
     /// `-n 150` asked for more than the running tick takes, so it says in one
-    /// line that the smaller bound applied; `-n 2` got more than it asked
-    /// for, which needs no line.
+    /// line first that the smaller bound applied; `-n 2` got more than it
+    /// asked for, which needs no line.
     #[test]
     fn a_bounded_sync_joins_a_tick_already_running_and_says_when_it_got_less() {
         use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
@@ -2232,20 +2233,22 @@ mod wire {
         assert_ok(&running, "mp sync");
         let more = more.wait_with_output().expect("mp sync -n 150's output");
         assert_ok(&more, "mp sync -n 150");
+        let summary = stdout(&running);
+        assert!(summary.starts_with('✓'), "{summary}");
         assert_eq!(
             stdout(&more),
             format!(
                 "ℹ Joined the sync of {ACCOUNT} already running, which takes only the \
                  newest 100 messages per mailbox, fewer than this sync asked for; sync again \
-                 once it is over for the rest\n"
+                 once it is over for the rest\n{summary}"
             )
         );
         let fewer = fewer.wait_with_output().expect("mp sync -n 2's output");
         assert_ok(&fewer, "mp sync -n 2");
         assert_eq!(
             stdout(&fewer),
-            "",
-            "a pass that got more than it asked says nothing"
+            summary,
+            "a pass that got more than it asked says no more than the summary"
         );
         assert_eq!(
             wire.local("inbox").len(),

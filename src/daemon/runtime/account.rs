@@ -204,18 +204,18 @@ pub struct TickOutcome {
     /// [`Change::SyncCompleted`](crate::daemon::state::Change).
     ///
     /// `None` on a blocked tick, which entered no phase and has nothing to
-    /// report, and `None` on a joiner, because the tick it attached to reports
-    /// its own outcome once and two commits for one tick would be two facts
-    /// where there was one.
+    /// report. A joiner carries the outcome of the tick it attached to, which
+    /// its caller reports as its own pass's, and never commits it: that
+    /// tick's runner does, once ([`TickOutcome::joined`]).
     pub sync: Option<SyncCompleted>,
     /// How many contacts the account's index holds once the tick folded in
     /// the correspondents its pass inserted (PERSO-234), `None` when it wrote
     /// no index; the committer announces it as `contact.changed`. `None` on a
-    /// joiner too, for the reason `sync` is.
+    /// joiner, since the tick's runner announces it once.
     pub contacts: Option<usize>,
     /// Whether the calendar sync that follows the mail pass moved the
     /// account's calendar cache (PERSO-200); the committer announces it as
-    /// `calendar.changed`. `false` on a joiner, for the reason `sync` is
+    /// `calendar.changed`. `false` on a joiner, for the reason `contacts` is
     /// `None`, and on a runtime built with injected hooks, which syncs no
     /// calendar.
     pub calendar_changed: bool,
@@ -967,9 +967,9 @@ impl AccountRuntime {
                     let published = receiver.borrow_and_update().clone();
                     if let Some(mut outcome) = published {
                         outcome.joined = true;
-                        // The runner commits the tick's outcome; a joiner
-                        // reports the same tick and must not commit it twice.
-                        outcome.sync = None;
+                        // The runner commits the tick's outcome and announces
+                        // what it wrote; a joiner reports the same tick to its
+                        // caller and must not announce it twice.
                         outcome.contacts = None;
                         outcome.calendar_changed = false;
                         return outcome;
