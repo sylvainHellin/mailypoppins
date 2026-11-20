@@ -416,6 +416,25 @@ async fn a_search_fetch_refused_for_one_message_keeps_the_others_and_says_why() 
     session.logout().await.ok();
 }
 
+/// PERSO-334: the search's second pass narrows a refusal of the whole set,
+/// which names no message, as the body pass does: each message it left out
+/// is asked for alone, the ones the server then sends are hits, and only the
+/// one it refuses alone is missing, in its own words.
+#[tokio::test]
+async fn a_search_fetch_refused_whole_is_narrowed_to_the_message_refused_alone() {
+    let server = server(&["one", "two", "three"]);
+    server.refuse_body_chunks(Some(LOCKED));
+    server.refuse_fetch_of(2, Some(NOT_FETCHED));
+    let mut session = super::open_imap_session(&config(&server)).await.unwrap();
+    let fetched = super::fetch_uids_on_session(&mut session, "INBOX", &[1, 2, 3])
+        .await
+        .expect("the messages the server sent alone");
+    let uids: Vec<u32> = fetched.emails.iter().map(|(uid, _)| *uid).collect();
+    assert_eq!(uids, vec![1, 3]);
+    assert_eq!(fetched.missing, vec![(2, NOT_FETCHED_WORDS.to_string())]);
+    session.logout().await.ok();
+}
+
 /// A body download the server refuses outright names that refusal for
 /// every message, instead of reporting them gone from the mailbox.
 #[tokio::test]
