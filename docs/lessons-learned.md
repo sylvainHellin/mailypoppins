@@ -3904,11 +3904,16 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 ## A command that resolves first must readdress the copy it resolved (2026-11-20)
 
 - `mp export` and `mp save` resolve a selector with one call and address the row again with a second, phrased in the selector the first answered; an answer that dropped a twinned copy's UID made the second call ambiguous where `mp show`, a single call, was not, so every single-row answer carries `selector::of_row`, the UID-qualified selector a listing prints for a twin.
-- A server search hit is resolved by Message-ID, which every copy shares; picking the first row by `(mailbox, uid)` named the Inbox copy of a hit in Sent, so the row in the hit's own mailbox comes first.
+- A server search hit is resolved by Message-ID, which every copy shares; picking the first row by `(mailbox, uid)` named the Inbox copy of a hit in Sent, so the row in the hit's own mailbox comes first, matched by that mailbox's store key (`sent`): a search target's `label` is the sidebar's (`Sent`), and a test that hands `to_hit` the store key as its label passes while every real search misses.
 
-## A runtime tick carries only its own bound (2026-11-20)
+## A whole-account pass belongs in the tick, bound and all (2026-11-20)
 
-- `sync.quick` with a `limit` went through the runtime tick whenever no `--mailbox` or `--dry-run` was named, and the tick takes `QUICK_TICK_LIMIT`, so `mp sync -n N` over a whole account silently ran the newest 100; a limit other than the tick's now takes the guarded pass, as a mailbox subset does.
+- `sync.quick` with a `limit` went through the runtime tick, which took `QUICK_TICK_LIMIT`, so `mp sync -n N` over a whole account silently ran the newest 100; routing it to the guarded pass instead skipped what only the tick does (the calendar sync, the drafts reconcile, the backlog flag) and ran a second pass beside a tick in flight, so the tick takes the caller's bound (`AccountRuntime::tick_until`'s `limit`, the scheduler and the watcher keep 100).
+- A pass that joins a tick in flight gets that tick's bound, reported as `TickOutcome::limit`; `sync.quick` answers `joined: {limit}` when it differs from the one asked for, and `mp sync` says so in one line instead of printing nothing.
+
+## "Run it again" is advice only for an idempotent command (2026-11-20)
+
+- A daemon that went away mid-operation may have finished the part that reaches someone else: `event.respond`, `event.update` and `event.cancel` mail the organizer or the attendees, and `hook.replay` runs a hook whatever its cursor says, so their exit-4 line says how to check (`mp sync` then `mp event show`, `mp outbox list` for an `imip:` event, `mp hooks list`); sends are safe to rerun only because the outbox refuses a second submission of a draft.
 
 ## A closed stdout is a println panic in Rust (2026-11-20)
 

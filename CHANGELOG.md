@@ -166,11 +166,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 - `mp export` and `mp save` take the UID selector of one of two copies of a message in one mailbox, as `mp show` does, instead of refusing it as ambiguous with the selector they were given among the choices; `mp show --json` and the mutations answer with that selector too.
-- A server search hit names the copy it was found in: a self-sent message hit in Sent gets the Sent copy's selector, not the Inbox copy's.
-- `mp sync -n N` bounds a sync of the whole account too, where it was ignored for the usual newest 100 per mailbox, and its help gives that 100 as the default instead of 50, which is also the default with `--mailbox` now.
+- A server search hit names the copy it was found in: a self-sent message hit in Sent gets the Sent copy's selector, not the Inbox copy's, on IMAP and in a Graph search across every folder.
+- `mp sync -n N` bounds a sync of the whole account too, where it was ignored for the usual newest 100 per mailbox, and its help gives that 100 as the default instead of 50, which is also the default with `--mailbox` now; a `-n` that joins a sync of the account already running says in one line that the running sync's bound applies.
 - A closed stdout ends any `mp` command quietly, as it ends `cat` (`mp list-messages --json | head`), instead of a panic message.
-- A command cut off by its daemon going away, a restart included, says the daemon went away while it ran and to run it again, instead of saying no daemon could serve it and to start one.
-- TUI: `ss` and `sS` name the account on their progress line, `Full sync (proton)...`, as the startup fetch does.
+- A command cut off by its daemon going away, a restart included, says the daemon went away while it ran and what to do next, instead of saying no daemon could serve it and to start one: run it again, or, for `mp event respond`, `mp invite`, `mp event update`, `mp event cancel`, `mp event create` and `mp hooks replay`, how to check whether the answer, change, event or hook run already went through before repeating it.
+- TUI: `ss` and `sS` name the account on their progress line, `Full sync (proton)...`, as the startup fetch does, and on the line that says they wait for the current sync.
 - `mp daemon stop` and `mp daemon restart` mark a stop that cut work short with a warning sign instead of a red cross, since the stop worked (PERSO-322).
 - An IMAP answer mp cannot read is logged and reported in the server's own words, once, instead of as lists of byte values, the watcher's re-read after a change included (PERSO-323).
 - A calendar-only account (a calendar_backend and no mail server) syncs its calendar on its own and shows ready instead of blocked; mp sync and the TUI's sync keys sync that calendar and say what it did or why it failed, instead of skipping the account as local-only (PERSO-318).
