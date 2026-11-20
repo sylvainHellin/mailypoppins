@@ -209,7 +209,7 @@ fn sx_cancels_the_running_sync_and_drops_the_one_parked_behind_it() {
     press(&mut app, &daemon, "ss");
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Quick sync queued (waiting for the current sync)")
+        Some("Quick sync (work) queued (waiting for the current sync)")
     );
     assert!(app.queued_action.is_some(), "the quick sync is parked");
 
