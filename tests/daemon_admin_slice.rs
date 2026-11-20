@@ -458,7 +458,8 @@ impl Slice {
     }
 
     /// The same, with the hooks `env` builds from the root on top of the
-    /// sandbox.
+    /// sandbox. It returns once the daemon's first drain has sent what the
+    /// seeded outbox owed ([`WireServers::await_startup_drain`]).
     fn wired_with(env: impl FnOnce(&Path) -> Vec<(String, String)>) -> Slice {
         let tmp = TempDir::new().expect("a temporary admin-slice root");
         fixture::seed(tmp.path());
@@ -470,6 +471,7 @@ impl Slice {
         let borrowed: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let daemon = DaemonFixture::start_with(tmp.path(), None, &borrowed);
+        servers.await_startup_drain(tmp.path(), fixture::ACCOUNT);
         Slice {
             daemon: Some(daemon),
             env,
@@ -1754,9 +1756,11 @@ async fn an_rsvp_cancelled_before_its_submission_sends_nothing() {
     cancel_at_commit_point(&mut conn, slice.root(), "calendar.rsvp", &id).await;
 
     assert!(
-        slice.wire().untouched(),
+        slice
+            .wire()
+            .untouched_but_for(&support::send_fixture::SEEDED_MIDS),
         "a cancelled RSVP reached the servers: {:?}",
-        slice.wire().smtp.rcpts()
+        slice.wire().submissions()
     );
     assert_eq!(
         all_rows(slice.root(), fixture::ACCOUNT),

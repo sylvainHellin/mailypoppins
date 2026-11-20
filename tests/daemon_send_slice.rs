@@ -240,6 +240,7 @@ use mailypoppins::daemon::methods::send::SEND_METHOD_SPECS;
 use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 use mailypoppins::outbox::OutboxState;
 
+use support::fake_imap::LoginPolicy;
 use support::fake_smtp::{SmtpAnswer, SmtpStep};
 use support::parity::{
     assert_byte_identical, mp_command, mp_no_daemon, oracle_command, pin_font_size, socket_path,
@@ -336,20 +337,21 @@ impl Slice {
     /// A root whose default account submits to the fake SMTP server and
     /// files its Sent copies on the fake IMAP server (PERSO-331), as
     /// [`WireServers::wire`] sets it up, with what `setup` makes of the two
-    /// servers before the daemon starts.
+    /// servers once the daemon's first drain has sent the seeded queued row
+    /// and filed the copies the seeded rows owe
+    /// ([`WireServers::await_startup_drain`]).
     fn wired(setup: impl FnOnce(&WireServers)) -> Slice {
-        Slice::wired_with(
+        let slice = Slice::wired_with(
             |_| Vec::new(),
-            |wire, root| {
-                wire.wire(root, fixture::ACCOUNT);
-                setup(wire);
-            },
-        )
+            |wire, root| wire.wire(root, fixture::ACCOUNT),
+        );
+        setup(slice.wire());
+        slice
     }
 
-    /// The same, with the hooks `env` builds from the root on top of the
-    /// sandbox, and `wire` given the root to configure: the daemon starts
-    /// once both returned.
+    /// The same with no setup, the hooks `env` builds from the root on top of
+    /// the sandbox, and `wire` given the root to configure: the daemon starts
+    /// once both returned, and this returns once its first drain did.
     fn wired_with(
         env: impl FnOnce(&Path) -> Vec<(String, String)>,
         wire: impl FnOnce(&WireServers, &Path),
@@ -363,6 +365,7 @@ impl Slice {
         let borrowed: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let daemon = DaemonFixture::start_with(tmp.path(), None, &borrowed);
+        servers.await_startup_drain(tmp.path(), fixture::ACCOUNT);
         Slice {
             daemon: Some(daemon),
             env,
@@ -1227,9 +1230,9 @@ async fn an_invitation_cancelled_before_its_submission_sends_nothing() {
     );
 
     assert!(
-        slice.wire().untouched(),
+        slice.wire().untouched_but_for(&fixture::SEEDED_MIDS),
         "a cancelled invitation reached the servers: {:?}, {:?}",
-        slice.wire().smtp.rcpts(),
+        slice.wire().submissions(),
         slice.wire().imap.contents(support::wire_fixture::SENT)
     );
     assert_eq!(
@@ -2623,7 +2626,7 @@ fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
         "and that row is finished: SMTP took it and the Sent copy is filed"
     );
 
-    let submitted = slice.wire().submitted_message_ids();
+    let submitted = slice.wire().submitted_message_ids(&fixture::SEEDED_MIDS);
     // SND-09 is about *this* message's copy, counted by its Message-ID rather
     // than by the Sent folder's size: the send drains the account's outbox on
     // its way out, so the seeded row that was waiting on its APPEND
@@ -3174,9 +3177,9 @@ fn a_routed_send_of_a_draft_already_sent_is_refused() {
         stderr(&out)
     );
     assert!(
-        slice.wire().untouched(),
+        slice.wire().untouched_but_for(&fixture::SEEDED_MIDS),
         "nothing reached the servers: {:?}",
-        slice.wire().smtp.rcpts()
+        slice.wire().submissions()
     );
 }
 
@@ -3424,7 +3427,11 @@ async fn a_send_result_renders_through_the_shared_wordings() {
     assert_eq!(outcome.account, fixture::ACCOUNT);
     // The Message-ID the build minted, which is the one the server took and
     // the one an outbox row is matched by (#0131: it used to be "").
-    let submitted = slice.wire().submitted_message_ids().first().cloned();
+    let submitted = slice
+        .wire()
+        .submitted_message_ids(&fixture::SEEDED_MIDS)
+        .first()
+        .cloned();
     assert_eq!(Some(outcome.message_id.clone()), submitted);
     assert_eq!(
         outcome.selector.as_deref(),
@@ -3456,14 +3463,17 @@ async fn a_send_result_renders_through_the_shared_wordings() {
 /// both `send.draft` and the `send.approved` batch go through the guard, and
 /// nothing reaches the transport.
 ///
-/// Routed side only (fake SMTP server). The fixture account has no IMAP
-/// server configured, which is a Drafts folder the guard cannot reach.
+/// Routed side only (fake servers). The account mirrors its drafts, and its
+/// IMAP server refuses every login once the daemon is up, which is a Drafts
+/// folder the guard cannot reach.
 #[tokio::test]
 async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
     let slice = Slice::wired_with(
         |_| Vec::new(),
-        |wire, root| wire.wire_smtp_only(root, fixture::ACCOUNT),
+        |wire, root| wire.wire_mirroring(root, fixture::ACCOUNT),
     );
+    slice.wire().imap.set_policy(LoginPolicy::Reject);
+    slice.wire().imap.drop_sessions();
     let path = fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(fixture::APPROVED_FILE);
     let text = std::fs::read_to_string(&path).unwrap();
     let pushed = text.replacen(
@@ -3509,8 +3519,11 @@ async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
         "{outcome:?}"
     );
 
-    let submitted = slice.wire().smtp.rcpts();
-    assert!(submitted.is_empty(), "nothing went out: {submitted:?}");
+    assert!(
+        slice.wire().untouched_but_for(&fixture::SEEDED_MIDS),
+        "nothing went out: {:?}",
+        slice.wire().submissions()
+    );
     assert!(path.exists(), "the draft stays");
 }
 

@@ -248,20 +248,23 @@ impl WireServers {
     /// The account submits to the SMTP server and files its Sent copies in
     /// the IMAP server's [`SENT`] folder, as its default sender. Its
     /// scheduled sync is off and so is its drafts mirror: an account of
-    /// these fixtures had no server before, so neither ever ran on it, and
-    /// the only server traffic is the send's own (the submission, the
-    /// APPEND and its dedup search).
+    /// these fixtures had no server before, so neither ever ran on it. What
+    /// reaches the servers is then the sends (the submission, the APPEND
+    /// and its dedup search), the watcher's IDLE on [`INBOX`], and the
+    /// daemon's first drain of the seeded outbox, which a test waits out
+    /// with [`WireServers::await_startup_drain`].
     pub fn wire(&self, root: &Path, account: &str) {
-        self.rewrite(root, account, true);
-    }
-
-    /// [`WireServers::wire`] with the SMTP server alone: the account sends
-    /// and has no IMAP server to file a copy in or to claim a draft from.
-    pub fn wire_smtp_only(&self, root: &Path, account: &str) {
         self.rewrite(root, account, false);
     }
 
-    fn rewrite(&self, root: &Path, account: &str, with_imap: bool) {
+    /// [`WireServers::wire`] with the drafts mirror on, as it is for a user:
+    /// a send of a draft the mirror pushed then claims its copy from the
+    /// IMAP server's [`DRAFTS`] folder first.
+    pub fn wire_mirroring(&self, root: &Path, account: &str) {
+        self.rewrite(root, account, true);
+    }
+
+    fn rewrite(&self, root: &Path, account: &str, mirror: bool) {
         let path = root.join("config.toml");
         let text =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -296,22 +299,20 @@ impl WireServers {
             _ => unreachable!("built as a table"),
         };
         imap.insert("sync_interval_secs".into(), 0.into());
-        if with_imap {
-            entry.insert("imap".into(), toml::Value::Table(imap));
-            let mailboxes = entry
-                .entry("mailboxes")
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-                .as_table_mut()
-                .expect("mailboxes is a table");
-            mailboxes.entry("sent").or_insert_with(|| {
-                let mut sent = toml::Table::new();
-                sent.insert("server".into(), SENT.into());
-                toml::Value::Table(sent)
-            });
-            let mut drafts = toml::Table::new();
-            drafts.insert("mirror".into(), false.into());
-            entry.insert("drafts".into(), toml::Value::Table(drafts));
-        }
+        entry.insert("imap".into(), toml::Value::Table(imap));
+        let mailboxes = entry
+            .entry("mailboxes")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .expect("mailboxes is a table");
+        mailboxes.entry("sent").or_insert_with(|| {
+            let mut sent = toml::Table::new();
+            sent.insert("server".into(), SENT.into());
+            toml::Value::Table(sent)
+        });
+        let mut drafts = toml::Table::new();
+        drafts.insert("mirror".into(), mirror.into());
+        entry.insert("drafts".into(), toml::Value::Table(drafts));
         fs::write(
             &path,
             toml::to_string(&config).expect("serialise the configuration"),
@@ -324,11 +325,9 @@ impl WireServers {
         secrets
             .set(&format!("smtp-password-{account}"), SMTP_PASSWORD)
             .expect("store the SMTP password");
-        if with_imap {
-            secrets
-                .set(&format!("imap-password-{account}"), IMAP_PASSWORD)
-                .expect("store the IMAP password");
-        }
+        secrets
+            .set(&format!("imap-password-{account}"), IMAP_PASSWORD)
+            .expect("store the IMAP password");
     }
 
     /// Every recipient the SMTP server took a message for, in order, as
@@ -350,11 +349,11 @@ impl WireServers {
     }
 
     /// The Message-IDs the SMTP server took, each once, in the order it
-    /// first took them.
-    pub fn submitted_message_ids(&self) -> Vec<String> {
+    /// first took them, those `background` names left out.
+    pub fn submitted_message_ids(&self, background: &[&str]) -> Vec<String> {
         let mut ids: Vec<String> = Vec::new();
         for (message_id, _, _) in self.submissions() {
-            if !ids.contains(&message_id) {
+            if !ids.contains(&message_id) && !background.contains(&message_id.as_str()) {
                 ids.push(message_id);
             }
         }
@@ -394,6 +393,50 @@ impl WireServers {
     /// SMTP server and no copy filed in [`SENT`].
     pub fn untouched(&self) -> bool {
         self.smtp.rcpts().is_empty() && self.imap.contents(SENT).is_empty()
+    }
+
+    /// Whether nothing but the messages `background` names reached either
+    /// server: no other message submitted or filed in [`SENT`], and no
+    /// recipient refused, since a refusal names no message.
+    pub fn untouched_but_for(&self, background: &[&str]) -> bool {
+        let ours = |message_id: &str| !background.contains(&message_id);
+        self.submissions().iter().all(|(mid, _, _)| !ours(mid))
+            && self.refused_recipients().is_empty()
+            && self
+                .imap
+                .contents(SENT)
+                .iter()
+                .all(|held| !ours(&held.message_id))
+    }
+
+    /// Wait until the daemon's first drain of `account` under `root` has
+    /// sent what the account's seeded outbox owed: no row left to submit and
+    /// no copy left to file.
+    ///
+    /// An account with a server gets a drainer, which a local-only one does
+    /// not, and it drains once [`DRAIN_DEBOUNCE`] after the daemon starts
+    /// (`src/daemon/runtime/drainer.rs`): a fixture's queued rows go out
+    /// then, beside whatever the test does. A test waits for that first,
+    /// so its own send never meets a drain already running, and then sets
+    /// the servers up for what it tests.
+    ///
+    /// [`DRAIN_DEBOUNCE`]: mailypoppins::daemon::runtime::drainer::DRAIN_DEBOUNCE
+    pub fn await_startup_drain(&self, root: &Path, account: &str) {
+        let store = root.join("accounts").join(account).join("store.sqlite3");
+        if !store.exists() {
+            return;
+        }
+        wait_for(&format!("the first drain of {account}"), || {
+            let store = mailypoppins::store::Store::open(&store).expect("open the account's store");
+            let rows = mailypoppins::outbox::unfinished_rows(&store, account).expect("the rows");
+            rows.iter().all(|row| {
+                !matches!(
+                    row.state,
+                    mailypoppins::outbox::OutboxState::PendingSend
+                        | mailypoppins::outbox::OutboxState::SentPendingAppend
+                )
+            })
+        });
     }
 }
 

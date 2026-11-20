@@ -177,6 +177,12 @@ pub const PARTIAL_MID: &str = "<partial@example.com>";
 /// filed yet (`SND-09`).
 pub const APPENDING_MID: &str = "<appending@example.com>";
 
+/// The `Message-ID`s of the four seeded rows: on an account moved onto the
+/// fake servers, the daemon's first drain sends the queued one and files the
+/// copies the queued and the appending rows owe, so a test tells its own
+/// traffic from theirs by these.
+pub const SEEDED_MIDS: [&str; 4] = [QUEUED_MID, FAILED_MID, PARTIAL_MID, APPENDING_MID];
+
 /// The row ids the four seeded rows take in a fresh store, in enqueue order.
 pub const QUEUED_ROW: i64 = 1;
 pub const FAILED_ROW: i64 = 2;
