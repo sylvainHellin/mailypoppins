@@ -275,7 +275,7 @@ mod tests {
         )
         .expect("new-mail note");
         let export = note_export_on(&d, None).expect("export");
-        assert_eq!(export.ids, [new.id.clone()]);
+        assert_eq!(export.ids, std::slice::from_ref(&new.id));
         let handed = note_handoff_on(&d, Some(export.ids.clone())).expect("handoff");
         assert_eq!(handed.text, export.text);
         let listed = note_list_on(&d).expect("list");
