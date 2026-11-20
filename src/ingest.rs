@@ -1801,7 +1801,8 @@ pub const FAILURE_SPACING_SECS: i64 = 1_800;
 /// count's `updated`, so the message waits another day; one that succeeds
 /// clears the count. A UIDVALIDITY reset clears it too
 /// ([`clear_mailbox_ingest_failures`]), which makes every renumbered message
-/// owed again at once.
+/// owed again at once, and a full sync, which only a user asks for, asks for
+/// every message given up on at once too.
 pub const GIVEN_UP_RETRY_SECS: i64 = 86_400;
 
 /// Count one failed attempt to write `uid`, and answer whether the message is
@@ -1916,7 +1917,8 @@ pub fn refusal_give_up_words(uid: i64, location: &str, words: &str, retry_at: &s
     format!(
         "Giving up for now on UID {uid} in '{location}': the server refused to send it on \
          {MAX_INGEST_ATTEMPTS} passes over at least {minutes} minutes ({words}). It no longer \
-         holds the prune back; mp asks the server for it again after {retry_at}."
+         holds the prune back; mp asks the server for it again after {retry_at}, or at once \
+         on a full sync."
     )
 }
 
@@ -3218,7 +3220,7 @@ mod tests {
             "Giving up for now on UID 3 in 'INBOX': the server refused to send it on 3 passes \
              over at least 60 minutes (the server answered NO: Some messages could not be \
              FETCHed (Failure)). It no longer holds the prune back; mp asks the server for it \
-             again after 2026-11-21 10:00."
+             again after 2026-11-21 10:00, or at once on a full sync."
         );
     }
 

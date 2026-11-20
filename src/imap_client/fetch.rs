@@ -831,8 +831,12 @@ where
     let (known_uids, uidvalidity_reset) = known.resolve(state.uid_validity);
     // The messages a pass has given up on (PERSO-333) are left out of the
     // body download and count as covered, until their retry is due; their
-    // UIDs are renumbered by a reset like every other.
-    let given_up: std::collections::BTreeMap<u32, i64> = if uidvalidity_reset {
+    // UIDs are renumbered by a reset like every other. An unbounded pass is a
+    // full sync, which only a user asks for (`sync.full`; every scheduled and
+    // watcher tick is quick), and asks for them again at once, so a fix on
+    // the server or in a new mp need not wait for the daily retry.
+    let full = limit.is_none_or(|limit| limit == usize::MAX);
+    let given_up: std::collections::BTreeMap<u32, i64> = if uidvalidity_reset || full {
         std::collections::BTreeMap::new()
     } else {
         given_up
