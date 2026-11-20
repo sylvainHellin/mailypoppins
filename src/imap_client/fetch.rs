@@ -176,40 +176,39 @@ pub async fn fetch_uids_on_session(
             crate::imap_client::words::server_words(&e)
         )
     })?;
-    // A `NO` after some of the messages keeps those (RFC 2180 4.1.2), and
-    // names the refusal as the reason the others are missing.
-    let partial = session
-        .uid_fetch_partial(&compress_uid_set(uids), "(BODY.PEEK[] FLAGS)")
-        .await
-        .map_err(|e| {
-            anyhow!(
-                "Failed to fetch emails: {}",
-                crate::imap_client::words::server_words(&e)
-            )
-        })?;
-    let absent = match &partial.refused {
-        Some(refusal) => super::words::server_words(refusal),
-        None => "no longer in the mailbox".to_string(),
-    };
-    let fetched = partial.messages;
+    // A `NO` keeps what came before it (RFC 2180 4.1.2) and names no
+    // message, so the body pass's narrowing asks for each one it left out
+    // alone (PERSO-334): a message refused alone is missing in the server's
+    // words, and one the server answers `OK` without is gone.
+    let chunk = fetch_body_chunk_on_session(session, uids).await?;
     let mut answer = Fetched::default();
     let mut answered = std::collections::HashSet::new();
-    for msg in fetched.iter() {
-        let Some(uid) = msg.uid else { continue };
+    for message in chunk.messages {
+        let Ok(uid) = u32::try_from(message.uid) else {
+            continue;
+        };
         answered.insert(uid);
-        match parse_rfc822_to_fetched_email(msg.body().unwrap_or_default()) {
+        let crate::sync::FetchedBody::Raw(raw) = &message.body else {
+            continue;
+        };
+        match parse_rfc822_to_fetched_email(raw) {
             Some(mut email) => {
-                email.flags = flags_of(msg);
+                email.flags = message.flags;
                 answer.emails.push((uid, email));
             }
             None => answer.missing.push((uid, "did not parse".to_string())),
         }
     }
+    for (uid, words) in chunk.refused {
+        answered.insert(uid);
+        answer.missing.push((uid, words));
+    }
     answer.missing.extend(
         uids.iter()
             .filter(|uid| !answered.contains(uid))
-            .map(|uid| (*uid, absent.clone())),
+            .map(|uid| (*uid, "no longer in the mailbox".to_string())),
     );
+    answer.missing.sort_by_key(|(uid, _)| *uid);
     Ok(answer)
 }
 
