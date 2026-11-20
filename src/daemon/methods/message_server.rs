@@ -1406,13 +1406,20 @@ fn to_hit(
     email: &FetchedEmail,
 ) -> ServerSearchHit {
     // Every row of the Message-ID, so the twins of the one the hit resolves
-    // to are among them (PERSO-244).
+    // to are among them (PERSO-244). The hit is the copy in the mailbox it
+    // was found in; a mailbox holding none (a folder the store does not
+    // list) falls back to a stored copy, which is still the message.
     let row =
         store.zip(email.message_id.as_deref()).and_then(
             |(store, id)| match read::find_by_message_id(store, account, id) {
-                Ok(rows) => {
+                Ok(mut rows) => {
                     let twins = crate::selector::Twins::among(&rows);
-                    rows.into_iter().next().map(|row| {
+                    let hit = rows
+                        .iter()
+                        .position(|row| row.mailbox == label)
+                        .unwrap_or(0);
+                    (!rows.is_empty()).then(|| {
+                        let row = rows.swap_remove(hit);
                         let selector = Selector::for_listed(account, &row, &twins).to_string();
                         (row, selector)
                     })
