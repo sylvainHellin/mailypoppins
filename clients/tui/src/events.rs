@@ -512,6 +512,12 @@ impl App {
         let Some(index) = self.account_index(&outcome.account) else {
             return Applied::Ignored;
         };
+        // The list of messages given up on (PERSO-334) is the account's, not
+        // the pass's: it lands whoever asked for the pass, and a failed tick
+        // says nothing about it.
+        if outcome.error.is_none() {
+            self.accounts[index].given_up = outcome.given_up.clone();
+        }
         if self.events.awaits_a_pass_on(&outcome.account) {
             return Applied::Ignored;
         }

@@ -1367,6 +1367,7 @@ mod tests {
             blocked: false,
             has_unseen: false,
             sync_health: mp_core::sync_health::SyncHealth::default(),
+            given_up: Vec::new(),
         }
     }
 

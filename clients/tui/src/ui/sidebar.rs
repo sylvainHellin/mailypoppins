@@ -317,6 +317,7 @@ mod tests {
             blocked: false,
             has_unseen: false,
             sync_health,
+            given_up: Vec::new(),
         }
     }
 
@@ -456,6 +457,50 @@ mod tests {
         );
         assert!(frame.contains("user"), "including its tail:\n{frame}");
         assert_eq!(alert_rows(&app), 3, "the block is paid for in the layout");
+    }
+
+    /// PERSO-334: a message the sync has given up on is warned about in the
+    /// sidebar, by mailbox and UID, in the server's words, with when mp asks
+    /// again and that the server still holds it; the warning goes with the
+    /// list.
+    #[test]
+    fn the_sidebar_warns_about_a_message_given_up_on_in_the_servers_words() {
+        let mut acct = account(
+            "perso",
+            SyncHealth::Ok {
+                at: chrono::Local::now(),
+            },
+        );
+        let retry = chrono::Local::now() + chrono::Duration::hours(20);
+        acct.given_up = vec![mp_protocol::events::GivenUpMessage {
+            mailbox: "inbox".to_string(),
+            uid: 3,
+            kind: mp_protocol::events::GivenUpKind::Refused,
+            reason: "the server answered NO: Some messages could not be FETCHed".to_string(),
+            retry_at: Some(retry.to_rfc3339()),
+        }];
+        let mut app = app_with(vec![acct], 0);
+        let alert = account_alert(&app).expect("an alert");
+        assert_eq!(alert.headline, "\u{26a0} 1 message not downloaded");
+        assert_eq!(
+            alert.reason,
+            format!(
+                "inbox UID 3, still on the server: the server answered NO: Some messages could \
+                 not be FETCHed. mp asks again {}.",
+                retry.format("%Y-%m-%d %H:%M")
+            )
+        );
+        let frame = render(&app, 40, 10);
+        assert!(frame.contains("1 message not downloaded"), "{frame}");
+        assert!(frame.contains("inbox UID 3"), "{frame}");
+        assert_eq!(alert_rows(&app), 5);
+
+        app.accounts[0].given_up.clear();
+        assert_eq!(
+            account_alert(&app),
+            None,
+            "the list emptied, so did the alert"
+        );
     }
 
     /// A healthy account, and an account that has not synced yet, add nothing.

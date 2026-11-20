@@ -1008,6 +1008,10 @@ pub struct AccountState {
     /// survives every later success of a *different* account: the exact race
     /// #0068 lost. Session-scoped, never read from disk.
     pub sync_health: mp_core::sync_health::SyncHealth,
+    /// The messages the sync has given up on for now (PERSO-334), as the
+    /// bootstrap's `sync_health` or the account's last `sync.completed` that
+    /// ran listed them: what the sidebar warns about until they arrive.
+    pub given_up: Vec<mp_protocol::events::GivenUpMessage>,
 }
 
 impl AccountState {
@@ -1059,6 +1063,7 @@ impl AccountState {
             opening: true,
             blocked: false,
             sync_health: mp_core::sync_health::SyncHealth::default(),
+            given_up: Vec::new(),
         }
     }
 
@@ -1089,6 +1094,7 @@ impl AccountState {
             opening: false,
             blocked: false,
             sync_health: mp_core::sync_health::SyncHealth::default(),
+            given_up: Vec::new(),
         }
     }
 

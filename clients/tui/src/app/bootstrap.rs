@@ -224,6 +224,9 @@ impl App {
             // client started (or while it was disconnected) is marked in the
             // picker and the sidebar, as the desktop's picker marks it.
             land_sync_health(&mut self.accounts[index].sync_health, &account.sync_health);
+            self.accounts[index]
+                .given_up
+                .clone_from(&account.sync_health.given_up);
             if !resync && !self.accounts[index].opening {
                 continue;
             }

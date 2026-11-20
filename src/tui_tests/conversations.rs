@@ -367,6 +367,7 @@ fn account_state() -> crate::tui::app::AccountState {
         blocked: false,
         has_unseen: false,
         sync_health: crate::sync_health::SyncHealth::default(),
+        given_up: Vec::new(),
     }
 }
 
