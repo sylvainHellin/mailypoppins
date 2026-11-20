@@ -24,6 +24,8 @@ mod opening_tests;
 pub mod prefs;
 pub mod queries;
 pub mod session;
+#[cfg(test)]
+mod sync_cancel_tests;
 pub mod theme;
 pub mod ui;
 
