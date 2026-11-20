@@ -377,7 +377,7 @@ fn a_sync_orphaned_by_the_daemons_stop_says_the_stop_cut_it_short() {
 }
 
 /// A sync whose daemon stopped and closed the connection says the stop cut it
-/// short as soon as the connection closes, as the desktop does, whether or not
+/// short as soon as the connection closes, as `mp sync` does, whether or not
 /// a daemon ever comes back, and only once: the snapshot of a daemon that does
 /// come back finds nothing of it left to report.
 #[test]

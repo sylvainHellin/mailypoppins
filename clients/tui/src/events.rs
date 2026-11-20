@@ -1068,9 +1068,11 @@ fn handle(app: &mut App, door: &dyn Queries, incoming: Incoming) {
             );
             // A daemon that announced its stop and closed the connection took
             // the ends of this client's syncs with it: they were cut short by
-            // that stop, which is said now, as the desktop says it, whether or
+            // that stop, which is said now, as `mp sync` says it, whether or
             // not a daemon comes back, and once, since they are no longer
-            // awaited when the next daemon's snapshot lands.
+            // awaited when the next daemon's snapshot lands. The desktop says
+            // the same line later, when it reconnects to the next daemon and
+            // its Rust layer drops the syncs it still awaited.
             if app.events.daemon_stopping() {
                 let syncs = app.events.take_syncs();
                 app.bg_count = app.bg_count.saturating_sub(syncs.len());
