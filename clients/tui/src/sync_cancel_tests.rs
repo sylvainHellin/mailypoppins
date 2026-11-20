@@ -284,3 +284,33 @@ fn a_cancel_that_came_too_late_says_nothing_was_cancelled() {
         last_level(&app)
     );
 }
+
+/// A sync the daemon cancelled because it was stopping ends on the line that
+/// names the stop, after the "Daemon stopping" warning the announcement
+/// left: nobody in this window asked for it to stop.
+#[test]
+fn a_sync_the_daemons_stop_cancelled_says_the_stop_cut_it_short() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    press(&mut app, &daemon, "sS");
+    app.apply_event(&EventEnvelope {
+        instance_id: INSTANCE.to_string(),
+        revision: 2,
+        kind: "daemon.shutting_down".to_string(),
+        payload: json!({"grace_secs": 0, "pending": []}),
+    });
+    assert_eq!(app.status_message.as_deref(), Some("Daemon stopping"));
+    app.apply_event(&cancelled_finish(3));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some(
+            "Sync of work cut short by the daemon stopping: what it already ingested stays, \
+             and the next sync goes on from there"
+        )
+    );
+    assert!(
+        matches!(last_level(&app), StatusLevel::Warning),
+        "{:?}",
+        last_level(&app)
+    );
+}
