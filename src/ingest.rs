@@ -1801,8 +1801,9 @@ pub const FAILURE_SPACING_SECS: i64 = 1_800;
 /// count's `updated`, so the message waits another day; one that succeeds
 /// clears the count. A UIDVALIDITY reset clears it too
 /// ([`clear_mailbox_ingest_failures`]), which makes every renumbered message
-/// owed again at once, and a full sync, which only a user asks for, asks for
-/// every message given up on at once too.
+/// owed again at once, and a full sync, which only a user asks for from the
+/// TUI or the desktop app, asks for every message given up on at once too,
+/// except in a `status-only` folder, whose window caps a full sync as well.
 pub const GIVEN_UP_RETRY_SECS: i64 = 86_400;
 
 /// Count one failed attempt to write `uid`, and answer whether the message is
@@ -1889,7 +1890,9 @@ pub fn note_ingest_failure(
 /// answer whether it is still owed, as [`note_ingest_failure`] answers for a
 /// message the store would not write (PERSO-333): the same counter, spacing
 /// and bound. The give-up says so in the server's words and names when mp
-/// asks again ([`refusal_give_up_words`]).
+/// asks again ([`refusal_give_up_words`]); `full_sync_asks` is whether a full
+/// sync of the mailbox asks at once, which a `status-only` folder's window
+/// keeps it from doing.
 pub fn note_fetch_refusal(
     store: &Store,
     account: &str,
@@ -1897,6 +1900,7 @@ pub fn note_fetch_refusal(
     location: &str,
     uid: i64,
     words: &str,
+    full_sync_asks: bool,
 ) -> bool {
     let error = format!("the server refused to send it: {words}");
     if record_ingest_failure(store, account, mailbox, uid, &error) {
@@ -1905,20 +1909,37 @@ pub fn note_fetch_refusal(
     let retry_at = crate::outbox::unix_now() + GIVEN_UP_RETRY_SECS;
     warn!(
         "{}",
-        refusal_give_up_words(uid, location, words, &local_minute(retry_at))
+        refusal_give_up_words(
+            uid,
+            location,
+            words,
+            &local_minute(retry_at),
+            full_sync_asks
+        )
     );
     false
 }
 
 /// The warning a refusal given up on logs, `retry_at` the local time mp asks
-/// again.
-pub fn refusal_give_up_words(uid: i64, location: &str, words: &str, retry_at: &str) -> String {
+/// again. A full sync is the TUI's or the desktop app's (`sync.full`): `mp
+/// sync` is a quick pass, whatever its `-n`.
+pub fn refusal_give_up_words(
+    uid: i64,
+    location: &str,
+    words: &str,
+    retry_at: &str,
+    full_sync_asks: bool,
+) -> String {
     let minutes = (MAX_INGEST_ATTEMPTS - 1) * FAILURE_SPACING_SECS / 60;
+    let at_once = if full_sync_asks {
+        ", or at once on a full sync from the TUI or the desktop app"
+    } else {
+        ""
+    };
     format!(
         "Giving up for now on UID {uid} in '{location}': the server refused to send it on \
          {MAX_INGEST_ATTEMPTS} passes over at least {minutes} minutes ({words}). It no longer \
-         holds the prune back; mp asks the server for it again after {retry_at}, or at once \
-         on a full sync."
+         holds the prune back; mp asks the server for it again after {retry_at}{at_once}."
     )
 }
 
@@ -2020,12 +2041,13 @@ pub(crate) fn space_ingest_failures(store: &Store) {
 /// whenever their retry is due: the arrivals the arrival mark no longer waits
 /// for, which a consumer that walks the mailbox by UID behind that mark (the
 /// mail hooks) has to pick up once they are written late (PERSO-333). A store
-/// that cannot answer names none.
+/// that cannot answer is an error, never an empty set: the caller forgets an
+/// owed UID that is no longer in it.
 pub fn given_up_unwritten(
     store: &Store,
     account: &str,
     mailbox: &str,
-) -> std::collections::HashSet<i64> {
+) -> Result<std::collections::HashSet<i64>> {
     let read = || -> rusqlite::Result<std::collections::HashSet<i64>> {
         let mut stmt = store.conn().prepare(
             "SELECT f.uid FROM ingest_failures f
@@ -2040,10 +2062,7 @@ pub fn given_up_unwritten(
         )?;
         rows.collect()
     };
-    read().unwrap_or_else(|e| {
-        warn!("Failed to read the unwritten messages given up on in '{mailbox}': {e}");
-        std::collections::HashSet::new()
-    })
+    read().with_context(|| format!("reading the messages given up on in '{mailbox}'"))
 }
 
 /// How many passes have failed to write `uid`. `0` when nothing is recorded.
@@ -3206,17 +3225,20 @@ mod tests {
     /// failed to write it.
     #[test]
     fn a_refusal_given_up_on_says_so_in_the_servers_words_and_when_mp_asks_again() {
+        let words = "the server answered NO: Some messages could not be FETCHed (Failure)";
         assert_eq!(
-            refusal_give_up_words(
-                3,
-                "INBOX",
-                "the server answered NO: Some messages could not be FETCHed (Failure)",
-                "2026-11-21 10:00"
-            ),
+            refusal_give_up_words(3, "INBOX", words, "2026-11-21 10:00", true),
             "Giving up for now on UID 3 in 'INBOX': the server refused to send it on 3 passes \
              over at least 60 minutes (the server answered NO: Some messages could not be \
              FETCHed (Failure)). It no longer holds the prune back; mp asks the server for it \
-             again after 2026-11-21 10:00, or at once on a full sync."
+             again after 2026-11-21 10:00, or at once on a full sync from the TUI or the \
+             desktop app."
+        );
+        // A `status-only` folder's window caps a full sync too, so it is not
+        // promised one.
+        assert!(
+            refusal_give_up_words(3, "Trash", words, "2026-11-21 10:00", false)
+                .ends_with("mp asks the server for it again after 2026-11-21 10:00."),
         );
     }
 

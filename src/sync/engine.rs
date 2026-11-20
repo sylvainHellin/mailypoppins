@@ -685,7 +685,18 @@ pub async fn run_sync<B: SyncBackend>(
                     ingest::note_ingest_failure(store, account, role, location, uid, error)
                 }
                 Failure::Refused(words) => {
-                    ingest::note_fetch_refusal(store, account, role, location, uid, words)
+                    // A windowed (`status-only`) target never runs uncapped,
+                    // so no full sync asks for it before its retry.
+                    let full_sync_asks = target.window.is_none();
+                    ingest::note_fetch_refusal(
+                        store,
+                        account,
+                        role,
+                        location,
+                        uid,
+                        words,
+                        full_sync_asks,
+                    )
                 }
             };
             if owed {

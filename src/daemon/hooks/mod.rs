@@ -140,7 +140,7 @@ pub fn scan(
             continue;
         }
         // The rows written late below the cursor, then the ones above it.
-        let given_up = crate::ingest::given_up_unwritten(store, name, &key);
+        let given_up = crate::ingest::given_up_unwritten(store, name, &key)?;
         let mut rows = rows_at(store, name, &key, &entry.owed)?;
         entry.owed.retain(|uid| given_up.contains(uid));
         rows.extend(rows_above(store, name, &key, entry.last_uid)?);
