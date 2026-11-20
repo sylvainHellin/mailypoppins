@@ -2098,6 +2098,107 @@ mod wire {
         assert_eq!(wire.local("inbox").len(), 3);
     }
 
+    /// `-n` bounds a whole-account sync as it bounds a `--mailbox` one: the
+    /// newest N of each mailbox, not the runtime tick's usual 100.
+    #[test]
+    fn mp_sync_n_bounds_a_whole_account_sync() {
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![
+                (1, mail("first", "ada@example.org", "First", "one")),
+                (2, mail("second", "bob@example.org", "Second", "two")),
+                (3, mail("third", "cy@example.org", "Third", "three")),
+            ],
+        );
+        wire.start(&[]);
+
+        let out = wire.mp(&["sync", "-n", "2"]);
+        assert_ok(&out, "mp sync -n 2");
+        assert_eq!(stdout(&out), "✓ Synced: 2 email(s) ingested\n");
+        assert_eq!(
+            wire.local("inbox")
+                .into_iter()
+                .map(|(uid, _)| uid)
+                .collect::<Vec<_>>(),
+            [2, 3],
+            "the newest two"
+        );
+    }
+
+    /// `count` messages for a folder, on UIDs 1 to `count`.
+    fn numbered(count: u32) -> Vec<(u32, Vec<u8>)> {
+        (1..=count)
+            .map(|uid| {
+                let id = format!("n{uid}");
+                (uid, mail(&id, "ada@example.org", &id, "body"))
+            })
+            .collect()
+    }
+
+    /// `mp sync --full` is the TUI's `sS` and the desktop's full sync: every
+    /// message each mailbox lists, past the quick pass's newest 100.
+    #[test]
+    fn mp_sync_full_takes_every_message() {
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(INBOX, 11, numbered(101));
+        wire.start(&[]);
+
+        let out = wire.mp(&["sync", "--full"]);
+        assert_ok(&out, "mp sync --full");
+        assert_eq!(stdout(&out), "✓ Synced: 101 email(s) ingested\n");
+        assert_eq!(wire.local("inbox").len(), 101);
+
+        // A full pass takes no bound.
+        let out = wire.mp(&["sync", "--full", "-n", "5"]);
+        assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("cannot be used with"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    /// `^C` on `mp sync --full` cancels the full pass as it cancels the
+    /// quick one (PERSO-321).
+    #[test]
+    fn ctrl_c_on_mp_sync_full_cancels_the_pass() {
+        use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
+
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(INBOX, 11, numbered(2));
+        let hold = super::support::send_fixture::commit_hold_dir(wire.root());
+        let hold_env = hold.to_string_lossy().into_owned();
+        wire.start(&[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
+
+        let sync = mp_command(wire.root())
+            .env(REQUIRE_ENV, "1")
+            .args(["sync", "--full"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn mp sync --full");
+        wait_for("the full pass to be held at its second mailbox", || {
+            hold.join("sync.full.held").exists()
+        });
+        // SAFETY: a signal to the child this test spawned and still holds.
+        unsafe { libc::kill(sync.id() as i32, libc::SIGINT) };
+        let out = sync.wait_with_output().expect("mp sync --full's output");
+
+        assert_eq!(out.status.code(), Some(130), "{}", stderr(&out));
+        assert_eq!(
+            stdout(&out),
+            format!(
+                "⚠ Sync of {ACCOUNT} cancelled: what it already ingested stays, \
+                 and the next sync goes on from there\n"
+            )
+        );
+        wait_for("the full pass to drop its outcome", || {
+            hold.join("sync.full.dropped").exists()
+        });
+    }
+
     /// `mp list-mailboxes` lists the folders the server's LIST names, each
     /// with the policy and the role the account gives it.
     #[test]
