@@ -1322,8 +1322,9 @@ impl AccountRuntime {
     /// reconcile waiting for it runs in between rather than behind the whole
     /// download. Another slice follows while a mailbox stopped at the budget
     /// and the slice saved something, the tick was not stopped and the
-    /// runtime not retired; the tick still ends with every body and reports
-    /// one outcome for all its slices ([`absorb`]).
+    /// runtime not retired, both asked again once the turn is back; the tick
+    /// still ends with every body and reports one outcome for all its slices
+    /// ([`absorb`]).
     ///
     /// What the slices recorded in the report is taken out before the turn
     /// is let go, since a drain in between resets it, and put back once the
@@ -1350,7 +1351,12 @@ impl AccountRuntime {
             drop(lock(turn).take());
             let guard = self.turn.lock().await;
             *lock(turn) = Some(guard);
-            if *self.retired.borrow() {
+            // A cancel or the daemon's shutdown may have landed while another
+            // holder had the turn: the next slice would cost a login, a
+            // listing and a drafts reconcile before its first stop point.
+            if *self.retired.borrow()
+                || crate::sync::stops_at(ctx.stop.as_ref(), crate::sync::StopPoint::Fetch)
+            {
                 break ran;
             }
             debug!(
