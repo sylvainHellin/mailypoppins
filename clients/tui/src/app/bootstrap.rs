@@ -142,6 +142,9 @@ impl App {
         // revision are the daemon's word about the state this snapshot
         // describes, so every event above it is comparable and everything at or
         // below it is already here.
+        // Read before the watermark clears it: a sync the stop left without
+        // its end was cut short by that stop.
+        let stopping = self.events.daemon_stopping();
         let orphaned = self
             .events
             .watermark(&bootstrap.instance_id, bootstrap.revision);
@@ -157,11 +160,28 @@ impl App {
         // when this TUI is the one to notify (PERSO-255); `0` is a daemon
         // that does not say.
         self.connection = (bootstrap.connection != 0).then_some(bootstrap.connection);
-        if orphaned > 0 {
+        if !orphaned.is_empty() {
             // The daemon that was running them is gone, so the spinner they
             // are holding up would never come down.
-            log::warn!("[events] {orphaned} operation(s) died with the previous daemon");
-            self.bg_count = self.bg_count.saturating_sub(orphaned);
+            log::warn!(
+                "[events] {} operation(s) died with the previous daemon",
+                orphaned.len()
+            );
+            self.bg_count = self.bg_count.saturating_sub(orphaned.len());
+        }
+        // A sync the announced stop left without its end says what
+        // `mp sync` and the desktop say of it.
+        if stopping {
+            for awaited in &orphaned {
+                if let crate::events::Awaited::Quick { account, .. }
+                | crate::events::Awaited::Full { account, .. } = awaited
+                {
+                    self.set_status_level(
+                        mp_client::format::sync_cut_by_shutdown_line(account),
+                        StatusLevel::Warning,
+                    );
+                }
+            }
         }
         // The daemon's current complaints, in its own report order, landed the
         // same way a `diagnostic.check_changed` is (P6-U8): a window that opens

@@ -261,9 +261,9 @@ impl EventState {
     ///
     /// A different instance is a daemon that restarted, so everything this
     /// client was waiting for died with it: the table is emptied and its
-    /// entries are reported as background work that ended, or the spinner would
-    /// run for the rest of the session.
-    pub(super) fn watermark(&mut self, instance_id: &str, revision: u64) -> usize {
+    /// entries are handed back, to be reported as background work that ended,
+    /// or the spinner would run for the rest of the session.
+    pub(super) fn watermark(&mut self, instance_id: &str, revision: u64) -> Vec<Awaited> {
         self.daemon_stopping = false;
         let restarted = self.is_new_instance(instance_id);
         match &mut self.tracker {
@@ -271,9 +271,9 @@ impl EventState {
             None => self.tracker = Some(StateTracker::new(revision, instance_id)),
         }
         if !restarted {
-            return 0;
+            return Vec::new();
         }
-        std::mem::take(&mut self.started).len()
+        std::mem::take(&mut self.started).into_values().collect()
     }
 
     /// Whether `event` may be applied, moving the watermark when it may.
@@ -610,7 +610,10 @@ impl App {
         let id = id.to_string();
         // The same handler the polled answer posted into, so every line, every
         // health mark and every refresh is the one that path produced.
-        super::bg::handle_bg_result(self, super::commands::settled(&awaited, &event.payload));
+        super::bg::handle_bg_result(
+            self,
+            super::commands::settled_in(&awaited, &event.payload, self.events.daemon_stopping()),
+        );
         Applied::Operation(id)
     }
 
@@ -641,7 +644,10 @@ impl App {
             );
             return;
         }
-        super::bg::handle_bg_result(self, super::commands::settled(&awaited, status));
+        super::bg::handle_bg_result(
+            self,
+            super::commands::settled_in(&awaited, status, self.events.daemon_stopping()),
+        );
     }
 
     /// An undo-send hold moved: the countdown, and the two sentences that end

@@ -480,9 +480,17 @@ pub(super) fn start_operation_id(
 /// arms already knew how to present, so nothing above this changed when the
 /// poll went away.
 pub fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
+    settled_in(awaited, payload, false)
+}
+
+/// [`settled`], `stopping` saying whether the daemon announced its stop
+/// before this end: a pass that failed after it was cut short by that stop,
+/// and ends as a cancelled one does, on the line that names the stop.
+pub fn settled_in(awaited: &Awaited, payload: &Value, stopping: bool) -> BgResult {
     // A cancelled pass has no outcome and is no failure of the account's
     // sync: it ends on the line that says what stays (PERSO-321).
-    if payload["state"].as_str() == Some("cancelled") {
+    let state = payload["state"].as_str();
+    if state == Some("cancelled") || (stopping && state == Some("failed")) {
         if let Awaited::Quick { account, .. } | Awaited::Full { account, .. } = awaited {
             return BgResult::SyncCancelled {
                 account: account.clone(),
