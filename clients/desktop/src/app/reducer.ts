@@ -139,6 +139,7 @@ import {
 } from "@/app/state";
 import { viewPanes } from "@/app/views";
 import { logActivity, logEvent, withNotice } from "@/app/activity";
+import { withGivenUp } from "@/app/givenUp";
 import { checkAccount, checkLevel, checkLine, isHealthCheck, keptDismissals, knownCheck, loginMayHaveMoved, withCheck } from "@/app/health";
 import {
   closeOutbox,
@@ -1511,6 +1512,9 @@ function applyEnvelope(s: AppState, kind: string, payload: unknown): AppState {
       const p = payload as SyncCompletedPayload;
       const health = p.error === null ? "ok" : "failed";
       if (p.error !== null && p.error !== undefined) s = syncTickFailed(s, p.account);
+      // The account's messages given up on (PERSO-334): replaced by a tick
+      // that ran, whoever asked for it; a failed tick says nothing of them.
+      else s = withGivenUp(s, p.account, p.given_up ?? []);
       const next = staleListIf(
         staleMailboxes(patchAccount(staleInvitations(s, p.account), p.account, { sync_health: health }), p.account),
         (a) => a === p.account,

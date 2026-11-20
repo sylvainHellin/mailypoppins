@@ -7,7 +7,7 @@ import { kindOfRole } from "@/components/sidebar/icons";
 import { useAppState, useDispatch } from "@/app/store";
 import { usePaneFocused } from "@/hooks/use-pane-focused";
 import { accountExpanded, accountNames, type AppState, type View } from "@/app/state";
-import type { AccountState, SyncHealthState } from "@/protocol/types";
+import type { AccountState, GivenUpMessage, SyncHealthState } from "@/protocol/types";
 import { outboxSummary, type OutboxSummary } from "@/app/outbox";
 import { installUpdate, updateEntryLabel } from "@/app/updates";
 import { loginRejected } from "@/app/health";
@@ -16,6 +16,8 @@ export type AccountView = {
   name: string;
   runtime: AccountState;
   health: SyncHealthState;
+  /** The messages the sync has given up on (PERSO-334). */
+  givenUp: GivenUpMessage[];
   /** The server rejected one of the account's logins (PERSO-296), as `account.credentials` last said. */
   loginRejected: boolean;
   outbox: OutboxSummary;
@@ -42,6 +44,7 @@ export function sidebarModel(s: AppState): AccountView[] {
       name,
       runtime: info?.runtime_state ?? snap?.state ?? "opening",
       health: info?.sync_health ?? snap?.sync_health.state ?? "unknown",
+      givenUp: snap?.sync_health.given_up ?? [],
       loginRejected: loginRejected(s, name) !== null,
       // The listing once this window read it, which moves on every
       // invalidation; `list_accounts` only moves on a bootstrap.
@@ -99,6 +102,7 @@ export function AppSidebar({ collapsible }: { collapsible: "icon" | "none" }) {
               name={a.name}
               runtime={a.runtime}
               health={a.health}
+              givenUp={a.givenUp}
               outbox={a.outbox}
               outboxOpen={s.outboxView?.account === a.name}
               outboxShown={s.outboxView !== null}

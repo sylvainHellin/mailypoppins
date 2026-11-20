@@ -4,6 +4,7 @@
 // reducer appends, ActivityLogDialog reads (clients/desktop/docs/shell.md,
 // "Activity log").
 
+import { givenUpHeadline } from "@/app/givenUp";
 import type { ConfigChanged, ConfigInvalid, HoldStatus, SyncCompleted } from "@/protocol/types";
 import type { ActivityKind, ActivityLevel, ActivityLogEntry, ActivityNotice, AppState } from "@/app/state";
 import { checkLevel, checkLine, isHealthCheck } from "@/app/health";
@@ -136,6 +137,8 @@ export function syncLine(event: SyncCompleted): string {
   if (p.bodies_truncated > 0) line += `, ${p.bodies_truncated} mailbox(es) stopped at the fetch deadline (resuming next sync)`;
   if (p.non_converging.length > 0) line += `, fetch not converging on ${p.non_converging.join(", ")} (see the log)`;
   if (p.failed_mutations > 0) line += `; ${p.failed_mutations} mutation(s) failed and were rolled back (see the log)`;
+  const givenUp = p.given_up ?? [];
+  if (givenUp.length > 0) line += `; ${givenUpHeadline(givenUp.length)} (see the sidebar)`;
   return line;
 }
 

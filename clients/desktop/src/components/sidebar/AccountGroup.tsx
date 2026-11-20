@@ -3,9 +3,10 @@ import { SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu } fro
 import { Skeleton } from "@/components/ui/skeleton";
 import { MailboxItem } from "@/components/sidebar/MailboxItem";
 import { OutboxState } from "@/components/sidebar/OutboxState";
+import { GivenUpState } from "@/components/sidebar/GivenUpState";
 import { SyncHealthBadge } from "@/components/sidebar/SyncHealthBadge";
 import type { MailboxKind } from "@/lib/gui-types";
-import type { AccountState, SyncHealthState } from "@/protocol/types";
+import type { AccountState, GivenUpMessage, SyncHealthState } from "@/protocol/types";
 import type { OutboxSummary } from "@/app/outbox";
 
 export type SidebarMailbox = {
@@ -20,6 +21,8 @@ export type AccountGroupProps = {
   name: string;
   runtime: AccountState;
   health: SyncHealthState;
+  /** The messages the sync has given up on (PERSO-334), warned about under the mailboxes. */
+  givenUp: GivenUpMessage[];
   outbox: OutboxSummary;
   /** The outbox view shows this account's outbox. */
   outboxOpen: boolean;
@@ -106,6 +109,7 @@ export function AccountGroup(p: AccountGroupProps) {
                 );
               })}
           <OutboxState account={p.name} outbox={p.outbox} active={p.mailShown && p.outboxOpen} onOpen={p.onOpenOutbox} />
+          <GivenUpState account={p.name} givenUp={p.givenUp} />
         </SidebarMenu>
       </SidebarGroupContent>
     </SidebarGroup>
