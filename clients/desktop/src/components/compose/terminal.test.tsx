@@ -170,17 +170,28 @@ async function started(m: ReturnType<typeof mount>) {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** A FontFaceSet whose load the test settles; jsdom has none. */
-function fakeFonts() {
-  let settle = { resolve: (_faces: unknown[]) => {}, reject: (_e: unknown) => {} };
+/**
+ * A FontFaceSet whose loads the test settles, the last one asked for unless
+ * it names another; jsdom has none. `loaded` is what its check answers: the
+ * symbols font there already.
+ */
+function fakeFonts({ loaded = false } = {}) {
+  const settles: { resolve: (faces: unknown[]) => void; reject: (e: unknown) => void }[] = [];
   const load = vi.fn(
     (_font: string, _text?: string) =>
       new Promise<unknown[]>((resolve, reject) => {
-        settle = { resolve, reject };
+        settles.push({ resolve, reject });
       }),
   );
-  Object.defineProperty(document, "fonts", { configurable: true, value: { load } });
-  return { load, resolve: () => settle.resolve([{}]), reject: (e: unknown) => settle.reject(e) };
+  const check = vi.fn((_font: string, _text?: string) => loaded);
+  Object.defineProperty(document, "fonts", { configurable: true, value: { load, check } });
+  const nth = (i?: number) => settles[i ?? settles.length - 1];
+  return {
+    load,
+    check,
+    resolve: (i?: number) => nth(i)?.resolve([{}]),
+    reject: (e: unknown, i?: number) => nth(i)?.reject(e),
+  };
 }
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
@@ -389,13 +400,13 @@ describe("the terminal pane", () => {
     const host = getComputedStyle(term.element as HTMLElement).fontFamily;
     // A larger font fits fewer cells in the same pane.
     xt.state.size = { cols: 88, rows: 26 };
-    m.rerender({ font: { family: "JetBrainsMono Nerd Font Mono", size: 16 } });
+    m.rerender({ font: { family: "JetBrainsMono Nerd Font Mono", size: 18 } });
     expect(term.options.fontFamily).toBe(`"JetBrainsMono Nerd Font Mono", ${host}, "Symbols Nerd Font Mono"`);
-    expect(term.options.fontSize).toBe(16);
+    expect(term.options.fontSize).toBe(18);
     expect(m.bridge.of("resize")).toEqual([{ cmd: "resize", session: 1, cols: 88, rows: 26 }]);
     expect(xt.state.terms).toHaveLength(1);
     expect(fonts.load).toHaveBeenCalledTimes(2);
-    expect(fonts.load.mock.calls[1][0]).toBe('16px "Symbols Nerd Font Mono"');
+    expect(fonts.load.mock.calls[1][0]).toBe('18px "Symbols Nerd Font Mono"');
     fonts.resolve();
     await waitFor(() => expect(term.atlasCleared).toBe(2));
     expect(term.redraws[term.redraws.length - 1]).toEqual({ start: 0, end: 25 });
@@ -405,7 +416,11 @@ describe("the terminal pane", () => {
     expect(term.options.fontFamily).toBe(`${host}, "Symbols Nerd Font Mono"`);
     expect(m.bridge.of("resize")).toHaveLength(2);
     m.rerender({ font: { family: null, size: null } });
-    expect(fonts.load).toHaveBeenCalledTimes(3);
+    // The symbols arrived at that size already: nothing to load, no atlas to rebuild.
+    fonts.resolve();
+    await sleep(10);
+    expect(fonts.load).toHaveBeenCalledTimes(2);
+    expect(term.atlasCleared).toBe(2);
   });
 
   it("loads the symbols font without holding the spawn, and redraws its glyphs once it arrives", async () => {
@@ -421,6 +436,76 @@ describe("the terminal pane", () => {
     fonts.resolve();
     await waitFor(() => expect(term.atlasCleared).toBe(1));
     expect(term.redraws).toEqual([{ start: 0, end: term.rows - 1 }]);
+  });
+
+  // The WebGL addon shares one glyph atlas among the terminals of one font,
+  // size and palette, and a rebuild leaves every other terminal on it drawing
+  // from emptied cells: only the font's arrival rebuilds it.
+  it("leaves the glyph atlas alone in a pane mounted after the symbols font arrived", async () => {
+    const fonts = fakeFonts();
+    const first = mount();
+    const a = await started(first);
+    fonts.resolve();
+    await waitFor(() => expect(a.atlasCleared).toBe(1));
+    const second = mount();
+    await waitFor(() => expect(second.onStarted).toHaveBeenCalledTimes(1));
+    const b = xt.state.terms[1];
+    fonts.resolve();
+    await sleep(10);
+    expect(fonts.load).toHaveBeenCalledTimes(1);
+    expect(b.atlasCleared).toBe(0);
+    expect(a.atlasCleared).toBe(1);
+  });
+
+  it("leaves the glyph atlas alone when the page has the symbols font already", async () => {
+    const fonts = fakeFonts({ loaded: true });
+    const m = mount();
+    const term = await started(m);
+    expect(fonts.check).toHaveBeenCalledWith(`${term.options.fontSize}px "Symbols Nerd Font Mono"`, expect.any(String));
+    fonts.resolve();
+    await sleep(10);
+    expect(fonts.load).not.toHaveBeenCalled();
+    expect(term.atlasCleared).toBe(0);
+  });
+
+  it("loads the symbols font once for the panes waiting on it, and each redraws once it arrives", async () => {
+    const fonts = fakeFonts();
+    const first = mount();
+    const a = await started(first);
+    const second = mount();
+    await waitFor(() => expect(second.onStarted).toHaveBeenCalledTimes(1));
+    const b = xt.state.terms[1];
+    expect(fonts.load).toHaveBeenCalledTimes(1);
+    fonts.resolve();
+    await waitFor(() => expect(b.atlasCleared).toBe(1));
+    expect(a.atlasCleared).toBe(1);
+    expect(a.redraws).toEqual([{ start: 0, end: a.rows - 1 }]);
+    expect(b.redraws).toEqual([{ start: 0, end: b.rows - 1 }]);
+  });
+
+  it("leaves the glyph atlas alone on a change to a size the symbols font has arrived at", async () => {
+    const fonts = fakeFonts({ loaded: true });
+    const m = mount();
+    const term = await started(m);
+    m.rerender({ font: { family: "JetBrainsMono Nerd Font Mono", size: 18 } });
+    expect(term.options.fontSize).toBe(18);
+    fonts.resolve();
+    await sleep(10);
+    expect(fonts.load).not.toHaveBeenCalled();
+    expect(term.atlasCleared).toBe(0);
+  });
+
+  it("rebuilds the atlas of the size a pane draws at, not of one it left before the font arrived", async () => {
+    const fonts = fakeFonts();
+    const m = mount();
+    const term = await started(m);
+    m.rerender({ font: { family: null, size: 18 } });
+    expect(fonts.load).toHaveBeenCalledTimes(2);
+    fonts.resolve(0);
+    await sleep(10);
+    expect(term.atlasCleared).toBe(0);
+    fonts.resolve();
+    await waitFor(() => expect(term.atlasCleared).toBe(1));
   });
 
   it("leaves a terminal unmounted before the symbols font arrives alone", async () => {
