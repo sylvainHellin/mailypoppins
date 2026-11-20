@@ -1296,6 +1296,10 @@ struct StopOutcome {
 /// *"`mp daemon stop` names the operations that prevented a clean stop"*, and
 /// nothing more: a user who has to read a paragraph to learn which sync was cut
 /// short will not read it.
+///
+/// The unclean line carries a warning sign rather than a cross (PERSO-322):
+/// the daemon did stop, and in a restart a cross above the start's tick read as
+/// a restart that failed.
 fn print_stop_outcome(outcome: &StopOutcome) {
     if outcome.unsettled.is_empty() {
         println!("{} daemon stopped", "\u{2713}".green());
@@ -1305,7 +1309,7 @@ fn print_stop_outcome(outcome: &StopOutcome) {
     let plural = if n == 1 { "operation" } else { "operations" };
     println!(
         "{} daemon stopped, {n} {plural} did not settle within {}s",
-        "\u{2717}".red(),
+        "\u{26a0}".yellow(),
         outcome.grace_secs
     );
     for (method, id) in &outcome.unsettled {

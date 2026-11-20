@@ -39,10 +39,10 @@ Really gone is the socket removed, nothing answering it, and the process exited,
 The two are counted one after the other: `--timeout-secs` starts when the daemon says it has finished, so a long grace cannot make the command give up on a daemon doing exactly what it was asked.
 
 A clean stop prints `✓ daemon stopped` and nothing else.
-A stop the grace did not cover names what it cut short, one line each:
+A stop the grace did not cover names what it cut short, one line each, under a warning sign rather than a cross, since the stop worked:
 
 ```
-✗ daemon stopped, 2 operations did not settle within 5s
+⚠ daemon stopped, 2 operations did not settle within 5s
   sync.full (3b91c07d5e8f42a6b1c4d09e7f2a5638)
   message.move (a17f4e02c9b84d31856c0fa2b7e91d44)
 ```
