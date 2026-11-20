@@ -100,6 +100,14 @@
 //! tick a cancel stopped commits no outcome, and every pass awaiting it,
 //! its runner's included, settles `cancelled`, so no client reads a pass
 //! that stopped half way as one that finished.
+//!
+//! A `sync.full` that finds a quick tick in flight does not join it: it waits
+//! for that tick to end and then runs a full tick of its own
+//! ([`AccountRuntime::tick_until`]), so it never settles with a quick pass's
+//! outcome. Cancelled while it waits, it settles `cancelled` having run
+//! nothing, and the quick tick runs to its end.
+//!
+//! [`AccountRuntime::tick_until`]: crate::daemon::runtime::account::AccountRuntime::tick_until
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

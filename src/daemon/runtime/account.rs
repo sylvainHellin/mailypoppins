@@ -37,9 +37,13 @@
 //!
 //! A second [`AccountRuntime::tick`] issued while one is running does not start
 //! a second body: it attaches to the running tick and returns its outcome with
-//! `joined: true`, including its `kind`. A `Full` tick that joins a `Quick` one
-//! reports `Quick`, because reporting the kind it asked for would claim a full
-//! pass that never ran. The join lasts exactly as long as the run.
+//! `joined: true`, including its `kind` and its bound. The join lasts exactly
+//! as long as the run. The one exception is a `Full` call that finds a
+//! `Quick` tick running (the watcher's, the scheduler's, a `mp sync -n`): it
+//! waits for that tick to end and then runs a full tick of its own, because
+//! the quick tick's outcome would report a full sync that never ran, with the
+//! older bodies still unfetched. A `Quick` call joins whatever runs, and a
+//! `Full` one joins a `Full`.
 //!
 //! ## A drain outside a tick (#0133)
 //!
@@ -445,6 +449,9 @@ pub(super) type DraftWatchCell = Arc<std::sync::OnceLock<Arc<crate::daemon::watc
 /// The tick in flight, as a caller that joins it sees it.
 #[derive(Clone)]
 struct RunningTick {
+    /// The kind that runs, which decides whether a full request joins it or
+    /// waits for it to end.
+    kind: TickKind,
     /// Resolves to the tick's outcome once it is over.
     outcome: watch::Receiver<Option<TickOutcome>>,
     /// Set by a joiner whose pass was cancelled while it waited (PERSO-321):
@@ -460,6 +467,14 @@ enum Slot {
     Run(watch::Sender<Option<TickOutcome>>, Arc<AtomicBool>),
     /// This call attaches to a run already in flight.
     Join(RunningTick),
+}
+
+/// What a [`AccountRuntime::tick`] call decided under the lock: its slot, or,
+/// for a full call that found a quick run in flight, to wait for that run's
+/// outcome before it decides again.
+enum Decision {
+    Take(Slot),
+    Wait(watch::Receiver<Option<TickOutcome>>),
 }
 
 /// Resolve once `cancel` is shut; never without one.
@@ -863,6 +878,26 @@ impl AccountRuntime {
         self.pool.get()
     }
 
+    /// The outcome of a `kind` call bounded at `limit` that ran no body, which
+    /// every refusal, failed join and cancelled wait starts from.
+    fn ran_nothing(&self, kind: TickKind, limit: usize) -> TickOutcome {
+        TickOutcome {
+            kind,
+            limit,
+            phases: Vec::new(),
+            joined: false,
+            blocked: false,
+            body_deadline: self.body_deadline,
+            status: String::new(),
+            error: None,
+            sync: None,
+            contacts: None,
+            calendar_changed: false,
+            calendar: None,
+            stopped: false,
+        }
+    }
+
     /// Run one tick, or attach to the one already running.
     pub async fn tick(&self, kind: TickKind) -> TickOutcome {
         self.tick_until(kind, None, None, None).await
@@ -885,6 +920,13 @@ impl AccountRuntime {
     /// one ignores it ([`tick_bound`]). A call that joins a tick already in
     /// flight gets that tick's bound, which its outcome's `limit` reports:
     /// one tick at a time is the rule, whatever bound each caller asked for.
+    ///
+    /// A full call that finds a quick tick in flight does not join it: it
+    /// waits for it to end and then runs a full tick of its own, or joins
+    /// the full one another call started meanwhile. Its `cancel` while it
+    /// waits ends the wait with a stopped outcome that ran nothing, and
+    /// leaves the quick tick alone, since that tick is not the sync the
+    /// cancel was about.
     pub async fn tick_until(
         &self,
         kind: TickKind,
@@ -897,56 +939,86 @@ impl AccountRuntime {
             // No phase, no hook, no login: the holder is doing the work.
             debug!("[daemon] {} refused a {kind:?} tick: blocked", self.account);
             return TickOutcome {
-                kind,
-                limit,
-                phases: Vec::new(),
-                joined: false,
                 blocked: true,
-                body_deadline: self.body_deadline,
-                status: String::new(),
-                error: None,
-                sync: None,
-                contacts: None,
-                calendar_changed: false,
-                calendar: None,
-                stopped: false,
+                ..self.ran_nothing(kind, limit)
             };
         }
 
         // Decided under the lock and acted on after it, so no guard is alive
-        // across the join's await.
-        let slot = {
-            let mut running = lock(&self.running);
-            if *self.retired.borrow() && running.is_none() {
-                // Retired: the lock is gone or about to go, and the runtime
-                // replacing this one is the engine now.
-                debug!("[daemon] {} refused a {kind:?} tick: retired", self.account);
-                return TickOutcome {
-                    kind,
-                    limit,
-                    phases: Vec::new(),
-                    joined: false,
-                    blocked: true,
-                    body_deadline: self.body_deadline,
-                    status: String::new(),
-                    error: None,
-                    sync: None,
-                    contacts: None,
-                    calendar_changed: false,
-                    calendar: None,
-                    stopped: false,
-                };
-            }
-            match running.as_ref() {
-                Some(tick) => Slot::Join(tick.clone()),
-                None => {
-                    let (sender, receiver) = watch::channel(None);
-                    let stop_asked = Arc::new(AtomicBool::new(false));
-                    *running = Some(RunningTick {
-                        outcome: receiver,
-                        stop_asked: Arc::clone(&stop_asked),
-                    });
-                    Slot::Run(sender, stop_asked)
+        // across the join's await. A full request behind a quick tick waits
+        // for it outside the lock and then decides again.
+        let slot = loop {
+            let decision = {
+                let mut running = lock(&self.running);
+                if *self.retired.borrow() && running.is_none() {
+                    // Retired: the lock is gone or about to go, and the
+                    // runtime replacing this one is the engine now.
+                    debug!("[daemon] {} refused a {kind:?} tick: retired", self.account);
+                    return TickOutcome {
+                        blocked: true,
+                        ..self.ran_nothing(kind, limit)
+                    };
+                }
+                match running.as_ref() {
+                    Some(tick) if kind == TickKind::Full && tick.kind == TickKind::Quick => {
+                        Decision::Wait(tick.outcome.clone())
+                    }
+                    Some(tick) => Decision::Take(Slot::Join(tick.clone())),
+                    None => {
+                        let (sender, receiver) = watch::channel(None);
+                        let stop_asked = Arc::new(AtomicBool::new(false));
+                        *running = Some(RunningTick {
+                            kind,
+                            outcome: receiver,
+                            stop_asked: Arc::clone(&stop_asked),
+                        });
+                        Decision::Take(Slot::Run(sender, stop_asked))
+                    }
+                }
+            };
+            let mut receiver = match decision {
+                Decision::Take(slot) => break slot,
+                Decision::Wait(receiver) => receiver,
+            };
+            debug!(
+                "[daemon] {}: a Full tick waits for the Quick one in flight",
+                self.account
+            );
+            // Its own cancel ends the wait and nothing else: the quick tick
+            // is not the sync the cancel was about.
+            let ended = async {
+                loop {
+                    if receiver.borrow_and_update().is_some() {
+                        return true;
+                    }
+                    if receiver.changed().await.is_err() {
+                        return false;
+                    }
+                }
+            };
+            tokio::select! {
+                reported = ended => {
+                    if !reported {
+                        warn!("[daemon] {} waited for a tick that never reported", self.account);
+                        return TickOutcome {
+                            error: Some(
+                                "the tick this call waited for ended without an outcome"
+                                    .to_string(),
+                            ),
+                            ..self.ran_nothing(kind, limit)
+                        };
+                    }
+                }
+                () = cancelled(cancel) => {
+                    info!(
+                        "[daemon] {}: a Full tick waiting for the Quick one in flight was \
+                         cancelled before it started",
+                        self.account
+                    );
+                    return TickOutcome {
+                        stopped: true,
+                        ..self.ran_nothing(kind, limit)
+                    };
                 }
             }
         };
@@ -955,6 +1027,7 @@ impl AccountRuntime {
             Slot::Join(RunningTick {
                 outcome: mut receiver,
                 stop_asked,
+                ..
             }) => {
                 debug!(
                     "[daemon] {}: a {kind:?} tick joined the one in flight",
@@ -993,21 +1066,11 @@ impl AccountRuntime {
                             self.account
                         );
                         return TickOutcome {
-                            kind,
-                            limit,
-                            phases: Vec::new(),
                             joined: true,
-                            blocked: false,
-                            body_deadline: self.body_deadline,
-                            status: String::new(),
                             error: Some(
                                 "the tick this call joined ended without an outcome".to_string(),
                             ),
-                            sync: None,
-                            contacts: None,
-                            calendar_changed: false,
-                            calendar: None,
-                            stopped: false,
+                            ..self.ran_nothing(kind, limit)
                         };
                     }
                 }
@@ -1039,39 +1102,14 @@ impl AccountRuntime {
                 // Retired while it waited: the engine lock is about to go.
                 debug!("[daemon] {} dropped a {kind:?} tick: retired", self.account);
                 TickOutcome {
-                    kind,
-                    limit,
-                    phases: Vec::new(),
-                    joined: false,
                     blocked: true,
-                    body_deadline: self.body_deadline,
-                    status: String::new(),
-                    error: None,
-                    sync: None,
-                    contacts: None,
-                    calendar_changed: false,
-                    calendar: None,
-                    stopped: false,
+                    ..self.ran_nothing(kind, limit)
                 }
             } else {
                 let outcome = if self.config.syncs_only_a_calendar() {
                     // No mail server to drain into or sync from (PERSO-318):
                     // the calendar half below is the whole tick.
-                    TickOutcome {
-                        kind,
-                        limit,
-                        phases: Vec::new(),
-                        joined: false,
-                        blocked: false,
-                        body_deadline: self.body_deadline,
-                        status: String::new(),
-                        error: None,
-                        sync: None,
-                        contacts: None,
-                        calendar_changed: false,
-                        calendar: None,
-                        stopped: false,
-                    }
+                    self.ran_nothing(kind, limit)
                 } else {
                     self.run_tick(kind, limit, stop).await
                 };
@@ -2142,12 +2180,14 @@ mod tests {
             async move { runtime.tick(TickKind::Quick).await }
         });
         let cancel = CancelToken::new();
+        // Quick: a full request waits behind a quick tick rather than
+        // joining it (`a_full_request_waits_out_a_quick_tick_...`).
         let joiner = {
             let runtime = Arc::clone(&runtime);
             let cancel = cancel.clone();
             tokio::spawn(async move {
                 runtime
-                    .tick_until(TickKind::Full, None, None, Some(&cancel))
+                    .tick_until(TickKind::Quick, None, None, Some(&cancel))
                     .await
             })
         };

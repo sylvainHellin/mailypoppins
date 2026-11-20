@@ -597,12 +597,14 @@ async fn a_second_tick_joins_the_running_one_and_the_body_runs_once() {
     .expect("a runtime starts against a free lock");
 
     let (first, second) = within("two concurrent ticks", async {
-        futures::future::join(runtime.tick(TickKind::Quick), async {
+        // The running tick is the full one: a full request that finds a quick
+        // tick running waits for it instead of joining it.
+        futures::future::join(runtime.tick(TickKind::Full), async {
             // The first tick is inside its body; only now can a second one join
             // it. No sleep: the body itself says when it got there.
             gate.arrived(1).await;
 
-            let joiner = runtime.tick(TickKind::Full);
+            let joiner = runtime.tick(TickKind::Quick);
             futures::pin_mut!(joiner);
 
             // A joiner cannot finish while the tick it attached to is still in
@@ -639,7 +641,7 @@ async fn a_second_tick_joins_the_running_one_and_the_body_runs_once() {
     assert!(second.joined, "the tick that arrived second joined it");
     assert_eq!(
         second.kind,
-        TickKind::Quick,
+        TickKind::Full,
         "a joiner reports the kind that actually ran, not the one it asked for"
     );
     assert_eq!(second.phases, first.phases, "a joiner sees the same phases");
@@ -758,12 +760,13 @@ async fn a_daemon_tick_carries_the_configured_body_fetch_deadline() {
     )
     .expect("a runtime starts against a free lock");
 
+    // What each kind spends of it is `tick_time`'s, pinned beside it.
     for kind in [TickKind::Quick, TickKind::Full] {
         let outcome = within("a deadline-carrying tick", runtime.tick(kind)).await;
         assert_eq!(
             outcome.body_deadline,
             Some(Duration::from_secs(7)),
-            "a {kind:?} daemon tick carries the account's body-fetch budget"
+            "a {kind:?} daemon tick carries the account's body-fetch deadline"
         );
     }
 }

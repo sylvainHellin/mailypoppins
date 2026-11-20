@@ -4621,8 +4621,9 @@ fn say_settled_pass(
         return Synced::Ran;
     }
     // A pass that joined a sync already running with a smaller bound
-    // (`mp sync -n 150` beside the scheduler's tick) has no outcome of its
-    // own: the line says it took fewer messages than asked.
+    // (`mp sync -n 150` beside the scheduler's tick) carries that sync's
+    // outcome: the line says it took fewer messages than asked, and the
+    // summary below is the sync it joined.
     if let Some(limit) = result["joined"]["limit"].as_u64() {
         say.out(&format!(
             "\u{2139} {}",

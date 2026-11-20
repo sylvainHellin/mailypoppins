@@ -106,7 +106,8 @@ pub fn sync_cancelled_line(account: &str) -> String {
 
 /// The line of a sync that joined a sync of `account` already running whose
 /// bound, `limit` new messages per mailbox, is smaller than the one it asked
-/// for (`mp sync -n 150`, or a full sync, beside the scheduler's quick one):
+/// for (`mp sync -n 150` beside the scheduler's quick one; a full sync waits
+/// for a quick one to end instead of joining it):
 /// the daemon runs one sync of an account at a time, so the line says this
 /// one took fewer messages instead of letting it pass silently.
 pub fn sync_joined_line(account: &str, limit: u64) -> String {
