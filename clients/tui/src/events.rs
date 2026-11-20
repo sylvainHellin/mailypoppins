@@ -125,6 +125,11 @@ pub struct EventState {
     /// The holds this session saw fire or be cancelled, newest last and at
     /// most [`ENDED_HOLDS_CAP`], so a late tick for one cannot re-arm it.
     ended_holds: VecDeque<String>,
+    /// Whether the daemon announced its stop (`daemon.shutting_down`), so a
+    /// sync of this window that ends cancelled was cut by that stop and not
+    /// by a cancel. Cleared by the next bootstrap, which a stopping daemon
+    /// refuses, so only the daemon that replaced it clears it.
+    daemon_stopping: bool,
 }
 
 /// How many ended hold ids [`EventState::ended_holds`] remembers: far more
@@ -259,6 +264,7 @@ impl EventState {
     /// entries are reported as background work that ended, or the spinner would
     /// run for the rest of the session.
     pub(super) fn watermark(&mut self, instance_id: &str, revision: u64) -> usize {
+        self.daemon_stopping = false;
         let restarted = self.is_new_instance(instance_id);
         match &mut self.tracker {
             Some(tracker) => tracker.rebootstrap(revision, instance_id),
@@ -287,6 +293,11 @@ impl EventState {
             // a resync rather than poisoning its tracker, and is refused alike.
             Observe::InstanceChanged | Observe::Gap => Admission::Refused,
         }
+    }
+
+    /// Whether the daemon announced its stop since the last bootstrap.
+    pub(super) fn daemon_stopping(&self) -> bool {
+        self.daemon_stopping
     }
 
     /// Remember an operation this client started.
@@ -743,6 +754,7 @@ impl App {
     /// reloaded and nothing is refetched, which is what `Ignored` promises a
     /// caller.
     fn apply_shutting_down(&mut self) -> Applied {
+        self.events.daemon_stopping = true;
         self.set_status_level("Daemon stopping".to_string(), StatusLevel::Warning);
         Applied::Ignored
     }

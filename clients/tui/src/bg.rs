@@ -367,12 +367,15 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
         //
         // An account whose one server is its calendar's (PERSO-318) has a
         // calendar sync alone for its pass, which has no point to stop at:
-        // the line says it finishes in the daemon.
+        // the line says it finishes in the daemon. A pass the daemon's stop
+        // cancelled says the stop cut it, since nobody here asked.
         BgResult::SyncCancelled { account } => {
             let calendar_only = app.accounts.iter().any(|state| {
                 state.account_config.name == account && state.account_config.syncs_only_a_calendar()
             });
-            let line = if calendar_only {
+            let line = if app.events.daemon_stopping() {
+                mp_client::format::sync_cut_by_shutdown_line(&account)
+            } else if calendar_only {
                 mp_client::format::calendar_sync_cancelled_line(&account)
             } else {
                 mp_client::format::sync_cancelled_line(&account)
