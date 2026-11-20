@@ -677,7 +677,9 @@ fn cancel_syncs(app: &mut App, commands: &dyn Queries) {
 /// runs.
 fn start_pass(app: &mut App, commands: &dyn Queries, method: &str, label: &str, action: Action) {
     if super::actions::sync_is_blocked(app) {
-        return super::actions::park_until_idle(app, action, label);
+        // Named after the account it was asked on, as its progress line is.
+        let queued = format!("{label} ({})", app.account_config.name);
+        return super::actions::park_until_idle(app, action, &queued);
     }
     // A calendar-only account (PERSO-318) has no IMAP and a pass all the same:
     // its calendar sync, as `mp sync` runs it.
