@@ -375,3 +375,43 @@ fn a_sync_orphaned_by_the_daemons_stop_says_the_stop_cut_it_short() {
     assert_eq!(app.status_message.as_deref(), Some(CUT));
     assert_eq!(app.bg_count, 0, "the spinner comes down");
 }
+
+/// A sync whose daemon stopped and closed the connection says the stop cut it
+/// short as soon as the connection closes, as the desktop does, whether or not
+/// a daemon ever comes back, and only once: the snapshot of a daemon that does
+/// come back finds nothing of it left to report.
+#[test]
+fn a_sync_whose_daemon_stopped_and_hung_up_says_the_stop_cut_it_short_once() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    press(&mut app, &daemon, "sS");
+    app.apply_event(&shutting_down(2));
+    let (sender, events) = std::sync::mpsc::channel();
+    sender
+        .send(crate::events::Incoming::Disconnected {
+            reason: "socket closed".to_string(),
+        })
+        .expect("the drain has not dropped the stream");
+    crate::events::drain(&mut app, &daemon, &events);
+    assert!(
+        app.status_log.iter().any(|line| line.message == CUT),
+        "{:?}",
+        app.status_log
+    );
+    assert_eq!(app.bg_count, 0, "the spinner comes down");
+
+    app.apply_bootstrap(&Bootstrap {
+        instance_id: "the-next-daemon".to_string(),
+        revision: 1,
+        ..Bootstrap::default()
+    });
+    assert_eq!(
+        app.status_log
+            .iter()
+            .filter(|line| line.message == CUT)
+            .count(),
+        1,
+        "said once: {:?}",
+        app.status_log
+    );
+}
