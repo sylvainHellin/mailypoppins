@@ -4103,7 +4103,14 @@ enum Synced {
     Ran,
     /// It failed, in the daemon's own words.
     Failed(String),
+    /// A `^C` stopped the run while this account's pass was followed
+    /// (PERSO-321): the pass was cancelled, or had already ended, and the
+    /// command has said which.
+    Interrupted,
 }
+
+/// The exit code of a run a `^C` stopped, the shell's 128 + SIGINT.
+const EXIT_INTERRUPTED: i32 = 130;
 
 /// Follow one operation to its end, rendering the reports it publishes on the
 /// way: `mp_client`'s [`Connection::await_operation`](mp_client::Connection::await_operation),
@@ -4199,13 +4206,20 @@ fn refused_as(error: &mp_protocol::RpcError, state: &str) -> bool {
 /// `--all-accounts` stays a loop in the client (#0071): the per-account header,
 /// the denominator that counts only what was attempted and the exit code are all
 /// rendering of a per-account result, and a `^C` stops the account currently
-/// running rather than every account at once.
+/// running rather than every account at once: it cancels that account's pass
+/// and ends the run with exit 130, leaving the accounts after it unsynced
+/// (PERSO-321).
 async fn routed_sync(
     accounts: &[AccountConfig],
     limit: usize,
     mailbox: Option<&[String]>,
     dry_run: bool,
 ) -> Result<()> {
+    // Listening from before the first call: a `^C` that lands while a pass is
+    // being started is held for the follow below, which cancels that pass,
+    // instead of killing the client and leaving the pass to run (PERSO-321).
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("listening for ^C")?;
     let mut connection = daemon_connection().await;
     // A client that follows its own operation has to be a subscriber first: the
     // progress and finished events reach bootstrapped connections only.
@@ -4216,11 +4230,30 @@ async fn routed_sync(
     // was a failure nothing named.
     let mut attempted = 0usize;
     let mut failed: Vec<String> = Vec::new();
+    let mut interrupted = false;
     for account_config in accounts {
+        // A `^C` between two accounts stops the run before the next starts.
+        if futures::FutureExt::now_or_never(interrupt.recv()).is_some() {
+            interrupted = true;
+            break;
+        }
         if accounts.len() > 1 {
             println!("\n{}", format!("── {} ──", account_config.name).bold());
         }
-        match sync_one_routed(&mut connection, account_config, limit, mailbox, dry_run).await {
+        let synced = sync_one_routed(
+            &mut connection,
+            account_config,
+            limit,
+            mailbox,
+            dry_run,
+            &mut interrupt,
+        )
+        .await;
+        match synced {
+            Synced::Interrupted => {
+                interrupted = true;
+                break;
+            }
             // A drafts-only account has nothing to sync and is not a failure;
             // counting it as one exits 1 on every run of a config that
             // legitimately holds one (#0071 review).
@@ -4250,6 +4283,9 @@ async fn routed_sync(
     if let Some(summary) = mailypoppins::sync_health::failure_summary(attempted, &failed) {
         eprintln!("{} {}", "✗".red(), summary);
     }
+    if interrupted {
+        std::process::exit(EXIT_INTERRUPTED);
+    }
     let code = mailypoppins::sync_health::exit_code(&failed);
     if code != 0 {
         std::process::exit(code);
@@ -4261,12 +4297,15 @@ async fn routed_sync(
 ///
 /// `sync.quick` and not `sync.full`, always: `mp sync -n N` is a quick pass with
 /// an explicit bound, and `-n` has a default, so the CLI has no unbounded form.
+///
+/// A `^C` while the pass is followed cancels it ([`cancel_pass`]).
 async fn sync_one_routed(
     connection: &mut mp_client::Connection,
     account: &AccountConfig,
     limit: usize,
     mailbox: Option<&[String]>,
     dry_run: bool,
+    interrupt: &mut tokio::signal::unix::Signal,
 ) -> Synced {
     let mut params = serde_json::json!({
         "account": account.name,
@@ -4302,16 +4341,82 @@ async fn sync_one_routed(
     };
 
     let id = wire_str(&started["operation_id"]).to_string();
-    let settled = await_operation(connection, &id, |payload| {
-        if let Some((line, stderr)) = drain_line(payload) {
-            if stderr {
-                eprintln!("{}", paint(&line));
-            } else {
-                println!("{}", paint(&line));
-            }
+    let settled = tokio::select! {
+        settled = await_operation(connection, &id, print_drain_line) => settled,
+        _ = interrupt.recv() => return cancel_pass(connection, account, &id, dry_run, interrupt).await,
+    };
+    print_settled_pass(account, dry_run, settled)
+}
+
+/// A drain's report as `mp sync` prints it, on stdout or on stderr.
+fn print_drain_line(payload: &serde_json::Value) {
+    if let Some((line, stderr)) = drain_line(payload) {
+        if stderr {
+            eprintln!("{}", paint(&line));
+        } else {
+            println!("{}", paint(&line));
         }
-    })
-    .await;
+    }
+}
+
+/// `^C` while `id`, `account`'s pass, is followed: `operation.cancel`, and
+/// one line that says what it did (PERSO-321).
+///
+/// The daemon settles the pass `cancelled` before it answers, and the pass
+/// stops at its next boundary keeping what it ingested, which it announces
+/// to every client itself (PERSO-133); the line says that much. A pass that
+/// had already ended is printed as it ended, then the line that says nothing
+/// was cancelled. A second `^C` while the cancel is out ends the client at
+/// once. The run stops after this account either way.
+async fn cancel_pass(
+    connection: &mut mp_client::Connection,
+    account: &AccountConfig,
+    id: &str,
+    dry_run: bool,
+    interrupt: &mut tokio::signal::unix::Signal,
+) -> Synced {
+    let answer = tokio::select! {
+        answer = daemon_try_call(
+            connection,
+            "operation.cancel",
+            serde_json::json!({"operation_id": id}),
+        ) => answer,
+        _ = interrupt.recv() => std::process::exit(EXIT_INTERRUPTED),
+    };
+    match answer {
+        Ok(_) => println!(
+            "{}",
+            paint(&format!(
+                "\u{26a0} {}",
+                mp_client::format::sync_cancelled_line(&account.name)
+            ))
+        ),
+        Err(error) if mp_client::operation::cancel_came_too_late(&error) => {
+            // Its finish is in the stream already, or on its way.
+            let settled = await_operation(connection, id, print_drain_line).await;
+            if let Synced::Failed(message) = print_settled_pass(account, dry_run, settled) {
+                eprintln!("{} {}: {}", "✗".red(), account.name, message);
+            }
+            println!(
+                "{}",
+                paint(&format!(
+                    "\u{2139} {}",
+                    mp_client::format::sync_cancel_too_late_line(&account.name)
+                ))
+            );
+        }
+        Err(error) => eprintln!(
+            "{} the cancel failed: {}; the sync of {} goes on in the daemon",
+            "✗".red(),
+            error.message,
+            account.name
+        ),
+    }
+    Synced::Interrupted
+}
+
+/// The lines of `account`'s pass once it settled, and how it ended.
+fn print_settled_pass(account: &AccountConfig, dry_run: bool, settled: Settled) -> Synced {
     let result = match settled {
         Settled::Done(result) => result,
         Settled::Failed(message) => return Synced::Failed(message),

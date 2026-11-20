@@ -175,6 +175,26 @@ impl Connection {
     }
 }
 
+/// JSON-RPC's invalid-params code, which `operation.cancel` answers an
+/// operation that is not running with.
+const INVALID_PARAMS: i32 = -32602;
+
+/// Whether `error`, the daemon's refusal of an `operation.cancel`, says the
+/// operation is not running any more: it already settled, or the daemon has
+/// forgotten it.
+///
+/// Both are `-32602` with the operation's id in `data`
+/// (`src/daemon/operations.rs`), which tells them from a malformed request,
+/// and either way the cancel has nothing left to stop: a client says it came
+/// too late, not that it failed, and the operation's own end says how it went.
+pub fn cancel_came_too_late(error: &mp_protocol::RpcError) -> bool {
+    error.code == INVALID_PARAMS
+        && error
+            .data
+            .as_ref()
+            .is_some_and(|data| data["operation_id"].is_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -183,6 +203,30 @@ mod tests {
     use tokio::net::UnixListener;
 
     use super::*;
+
+    /// A cancel refused for an operation that is over, or forgotten, came too
+    /// late; any other refusal is the cancel failing.
+    #[test]
+    fn a_cancel_refused_for_an_operation_that_is_over_came_too_late() {
+        let refusal = |code: i32, data: Option<Value>| mp_protocol::RpcError {
+            code,
+            message: "refused".to_string(),
+            data,
+        };
+        assert!(cancel_came_too_late(&refusal(
+            -32602,
+            Some(json!({"operation_id": "abc", "state": "succeeded"}))
+        )));
+        assert!(cancel_came_too_late(&refusal(
+            -32602,
+            Some(json!({"operation_id": "abc"}))
+        )));
+        assert!(!cancel_came_too_late(&refusal(-32602, None)));
+        assert!(!cancel_came_too_late(&refusal(
+            -32003,
+            Some(json!({"operation_id": "abc"}))
+        )));
+    }
 
     /// A socket in a scratch directory of its own.
     fn socket(name: &str) -> PathBuf {

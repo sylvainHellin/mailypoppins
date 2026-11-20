@@ -88,6 +88,25 @@ pub fn refused_rebuild_line(saved: &str, contacts: u64, kept: u64) -> Option<Str
     }
 }
 
+/// The line a sync the user cancelled ends with, in every client
+/// (PERSO-321).
+///
+/// The daemon keeps what the pass ingested before it stopped, announces it
+/// to every client (PERSO-133), and the next pass resumes from the cursors it
+/// left, so the line says so rather than that the work is lost.
+pub fn sync_cancelled_line(account: &str) -> String {
+    format!(
+        "Sync of {account} cancelled: what it already ingested stays, \
+         and the next sync goes on from there"
+    )
+}
+
+/// The line a cancel that came too late earns (PERSO-321): the sync had
+/// already ended, so nothing was cancelled, and its own end says how it went.
+pub fn sync_cancel_too_late_line(account: &str) -> String {
+    format!("The sync of {account} had already ended: nothing was cancelled")
+}
+
 /// The line under a server search the limit cut (PERSO-175): more matched
 /// than the `shown` hits, and `remedy`, the client's own way to see them
 /// (`raise -n to see them` in `mp search`, a narrower search in the TUI and
