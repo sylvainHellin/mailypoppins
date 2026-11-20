@@ -365,6 +365,35 @@ async fn two_copies_in_one_mailbox_are_listed_by_uid_and_each_resolves() {
     );
 }
 
+/// Every command that takes a selector resolves a copy's UID-qualified one
+/// the way `mp show` does: `mp export` asks the daemon twice, once to resolve
+/// and once to export, and the second call is phrased in the selector the
+/// first answered with, so that answer keeps the UID that names the copy.
+/// The fixture's rows carry no raw message, so an export that got past the
+/// address goes to the server and stops at the missing credentials.
+#[test]
+fn each_copys_selector_is_taken_by_show_export_and_save() {
+    let slice = Slice::start_with(seed_second_archive_copy);
+    let in_archive = fixture::message_selector(fixture::ACCOUNT, "archive", fixture::SHARED);
+    for uid in [1, 9] {
+        let selector = format!("{in_archive}/{uid}");
+        let dest = TempDir::new().expect("an export directory");
+        let dir = dest.path().to_str().expect("a UTF-8 path");
+        let out = slice.routed(&["export", &selector, "-o", dir]);
+        assert_refused(&out, fixture::CREDENTIALS_REFUSAL);
+
+        // The selector `mp show` prints names the copy it showed.
+        let shown = slice.routed(&["show", "--json", &selector]);
+        assert_eq!(shown.status.code(), Some(0), "{shown:?}");
+        let shown: Value = serde_json::from_slice(&shown.stdout).expect("show --json");
+        assert_eq!(shown["selector"], json!(selector), "{shown}");
+
+        // `mp save` resolves the copy, and its refusal names that copy.
+        let out = slice.routed(&["save", &selector, "-o", dir]);
+        assert_refused(&out, &format!("{selector} has no attachments"));
+    }
+}
+
 /// The selectors of `out`'s stdout that name [`fixture::SHARED`], in the order
 /// they print.
 fn shared_selectors(out: &Output) -> Vec<String> {
