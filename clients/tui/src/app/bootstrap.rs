@@ -172,16 +172,7 @@ impl App {
         // A sync the announced stop left without its end says what
         // `mp sync` and the desktop say of it.
         if stopping {
-            for awaited in &orphaned {
-                if let crate::events::Awaited::Quick { account, .. }
-                | crate::events::Awaited::Full { account, .. } = awaited
-                {
-                    self.set_status_level(
-                        mp_client::format::sync_cut_by_shutdown_line(account),
-                        StatusLevel::Warning,
-                    );
-                }
-            }
+            self.say_syncs_cut_by_the_stop(&orphaned);
         }
         // The daemon's current complaints, in its own report order, landed the
         // same way a `diagnostic.check_changed` is (P6-U8): a window that opens

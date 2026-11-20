@@ -300,6 +300,20 @@ impl EventState {
         self.daemon_stopping
     }
 
+    /// Forget every sync this client awaits and hand them back: what a
+    /// connection the stopping daemon closed leaves without its end.
+    pub(super) fn take_syncs(&mut self) -> Vec<Awaited> {
+        let ids: Vec<String> = self
+            .started
+            .iter()
+            .filter(|(_, awaited)| matches!(awaited, Awaited::Quick { .. } | Awaited::Full { .. }))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter()
+            .filter_map(|id| self.started.remove(id))
+            .collect()
+    }
+
     /// Remember an operation this client started.
     pub(super) fn started(&mut self, id: String, awaited: Awaited) {
         self.started.insert(id, awaited);
@@ -745,6 +759,19 @@ impl App {
         Applied::Hold(operation)
     }
 
+    /// The line of each of `awaited`'s syncs that the daemon's announced stop
+    /// left without its end, the words `mp sync` and the desktop use.
+    pub(super) fn say_syncs_cut_by_the_stop(&mut self, awaited: &[Awaited]) {
+        for awaited in awaited {
+            if let Awaited::Quick { account, .. } | Awaited::Full { account, .. } = awaited {
+                self.set_status_level(
+                    mp_client::format::sync_cut_by_shutdown_line(account),
+                    StatusLevel::Warning,
+                );
+            }
+        }
+    }
+
     /// The daemon is going away (P6-U4).
     ///
     /// One status line and nothing else. The socket closes a moment later, and
@@ -1021,6 +1048,16 @@ fn handle(app: &mut App, door: &dyn Queries, incoming: Incoming) {
                 "The daemon is not reachable; reconnecting...".to_string(),
                 StatusLevel::Warning,
             );
+            // A daemon that announced its stop and closed the connection took
+            // the ends of this client's syncs with it: they were cut short by
+            // that stop, which is said now, as the desktop says it, whether or
+            // not a daemon comes back, and once, since they are no longer
+            // awaited when the next daemon's snapshot lands.
+            if app.events.daemon_stopping() {
+                let syncs = app.events.take_syncs();
+                app.bg_count = app.bg_count.saturating_sub(syncs.len());
+                app.say_syncs_cut_by_the_stop(&syncs);
+            }
         }
     }
 }
