@@ -678,6 +678,42 @@ fn two_removals_of_one_resource_stay_two_entries() {
     assert_eq!(revisions(&drain(&mut queue)), vec![2, 3]);
 }
 
+/// A change never coalesces past a lifecycle event queued after it
+/// (PERSO-337): merged, the earlier change would take the later one's
+/// revision and move behind the lifecycle event, so a client would read
+/// `config.changed`, which closes a configuration swap, before the state the
+/// swap committed. The later change queues behind the lifecycle event, and
+/// two changes after it still merge with each other.
+#[test]
+fn a_change_never_coalesces_past_a_lifecycle_event_queued_after_it() {
+    let mut queue = events_capped(512);
+    assert_eq!(
+        queue.push(Revision(3), readiness("delta", "blocked")),
+        Push::Queued
+    );
+    assert_eq!(
+        queue.push(Revision(4), lifecycle(json!({"added": ["delta"]}))),
+        Push::Queued
+    );
+    assert_eq!(
+        queue.push(Revision(5), readiness("delta", "blocked")),
+        Push::Queued,
+        "the swap's state stays ahead of the lifecycle event it preceded"
+    );
+    assert_eq!(
+        queue.push(Revision(6), readiness("delta", "ready")),
+        Push::Coalesced,
+        "behind the lifecycle event, two states of one account still merge"
+    );
+    let drained = drain(&mut queue);
+    assert_eq!(revisions(&drained), vec![3, 4, 6]);
+    assert_eq!(
+        drained[0],
+        Outgoing::Event(Revision(3), readiness("delta", "blocked")),
+        "the change committed before the lifecycle event is delivered before it: {drained:?}"
+    );
+}
+
 /// Lifecycle events are not state, so nothing about them is redundant: two of
 /// one kind are two things that happened.
 #[test]

@@ -1589,6 +1589,7 @@ State changes reach clients as the `state.event` notification, whose `params` is
 
 The revision counter is dense: it is strictly increasing within an instance and every committed change takes the next number, so no number is ever skipped on the daemon's side.
 What one connection receives is strictly increasing but not necessarily dense, because coalescing merges two queued events into one that carries the newer revision and the older number never travels.
+A merge never crosses a lifecycle event queued between the two (PERSO-337), so a change committed before a lifecycle event is delivered before it: the account states of a configuration swap reach a client ahead of the `config.changed` that closes it.
 Delivery order is therefore the contract, and the daemon says so itself when something was lost: a `state.resync_required` notification, never a hole a client has to infer.
 
 A client compares each event against its watermark and does one of four things: an event above it is applied and moves it; one at or below it is a duplicate the snapshot already carries and is dropped without a word; one from an unfamiliar instance is refused whatever its number, because revisions are only comparable within the daemon process that issued them; and a `state.resync_required` poisons the stream until a fresh `state.bootstrap` clears it.

@@ -27,7 +27,10 @@
 //!    revision order. `Replace` is keyed by `(kind, resource)`, `Invalidate` by
 //!    `(resource, scope)`, and `Remove` and `Lifecycle` have no key: a removal
 //!    is a fact about a moment, and merging two would move the earlier one past
-//!    whatever happened between them.
+//!    whatever happened between them. For the same reason a merge never
+//!    crosses a lifecycle event queued after the entry it would replace: the
+//!    event is appended instead, so a change committed before `config.changed`
+//!    is read before it (PERSO-337).
 //! 3. **Fit.** An event that keeps both caps is appended.
 //! 4. **Overflow.** Otherwise every queued domain event is discarded, the
 //!    queued lifecycle events are kept in their order, the queue is poisoned
@@ -489,16 +492,28 @@ impl Outbound {
         self.poisoned = false;
     }
 
-    /// Where a queued entry shares `key`, if one does.
+    /// Where a queued entry shares `key` with no lifecycle event behind it,
+    /// if one does.
+    ///
+    /// A merge moves the queued change to the tail with the newer revision,
+    /// so it may not cross a lifecycle event queued after it: the client
+    /// would read the lifecycle event first, `config.changed` before the
+    /// account state of the swap it closes (PERSO-337). The search runs from
+    /// the tail and stops at the first lifecycle event, so a change queued
+    /// after one still merges with the next.
     ///
     /// Compared in place rather than through [`Event::key`]: that clones a
     /// resource and a scope per queued entry, and a push scans the whole queue,
     /// so filling a 512-entry queue cost a quarter of a million allocations.
     fn position_of(&self, key: &Key) -> Option<usize> {
-        self.queue.iter().position(|entry| match entry {
-            Entry::Event { event, .. } => event.has_key(key),
-            Entry::Resync => false,
-        })
+        for (at, entry) in self.queue.iter().enumerate().rev() {
+            match entry {
+                Entry::Event { event, .. } if event.is_lifecycle() => return None,
+                Entry::Event { event, .. } if event.has_key(key) => return Some(at),
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Whether one more event of `weight` keeps both caps.
