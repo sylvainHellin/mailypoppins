@@ -1198,6 +1198,73 @@ async fn a_cancel_of_a_pass_that_joined_another_clients_tick_stops_it_for_both()
     );
 }
 
+/// A pass that joined another client's tick is answered with that tick's
+/// outcome, the one its runner is answered with: a joined `mp sync` that
+/// settled `{blocked: false, outcome: null}` printed nothing at all and
+/// exited 0, as if no sync had run.
+///
+/// The first connection's pass runs the tick and is held at its second
+/// mailbox boundary by the commit-hold hook; the second connection's pass
+/// joins it there; the hook is then released and both run to their end.
+#[tokio::test]
+async fn a_pass_that_joined_another_clients_tick_is_answered_with_its_outcome() {
+    let tmp = TempDir::new().expect("a temporary sync-slice root");
+    fixture::seed(tmp.path());
+    let hold = commit_hold_dir(tmp.path());
+    let hold_env = hold.to_string_lossy().into_owned();
+    let daemon = DaemonFixture::start_with(tmp.path(), None, &[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
+    let slice = Slice { daemon, tmp };
+    if !fixture::seed_secrets(slice.root()) {
+        return;
+    }
+    let mut runner = slice.connect().await;
+    let mut joiner = slice.connect().await;
+    call(&mut runner, "state.bootstrap", json!({})).await;
+    await_daemon_log(
+        slice.root(),
+        &format!("[drainer] published {}", fixture::SERVER_ACCOUNT),
+    )
+    .await;
+
+    let first = call(
+        &mut runner,
+        "sync.quick",
+        json!({"account": fixture::SERVER_ACCOUNT}),
+    )
+    .await;
+    let first = operation_id(&first);
+    await_commit_marker(&hold, "sync.quick", "held", SETTLE_DEADLINE).await;
+    let second = call(
+        &mut joiner,
+        "sync.quick",
+        json!({"account": fixture::SERVER_ACCOUNT}),
+    )
+    .await;
+    let second = operation_id(&second);
+    await_daemon_log(
+        slice.root(),
+        &format!(
+            "[daemon] {}: a Quick tick joined the one in flight",
+            fixture::SERVER_ACCOUNT
+        ),
+    )
+    .await;
+    std::fs::write(hold.join("sync.quick.release"), b"").expect("release the hold");
+
+    let ran = settle(&mut runner, &first).await;
+    let joined = settle(&mut joiner, &second).await;
+    assert_eq!(ran["state"], "succeeded", "{ran}");
+    assert_eq!(joined["state"], "succeeded", "{joined}");
+    assert!(
+        ran["result"]["outcome"].is_object(),
+        "the runner is answered with the tick's outcome: {ran}"
+    );
+    assert_eq!(
+        joined["result"], ran["result"],
+        "the joined pass is answered with the outcome of the tick it joined"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. `mailbox.list_server`
 // ---------------------------------------------------------------------------
