@@ -65,10 +65,10 @@ async fn verdict_of(server: &RecordingSmtpServer, user: &str) -> RecipientResult
 }
 
 /// A send to two recipients goes out as one transaction each, over STARTTLS
-/// and a login each, and the server holds the bytes that were built: lettre
-/// doubles the leading dot and the server undoes it (RFC 5321 4.5.2), and
-/// the CRLF before the closing `.` is lettre's own, a blank line the
-/// message gains on the wire.
+/// and a login each, and the server holds the bytes that were built, not one
+/// more: lettre doubles the leading dot and the server undoes it (RFC 5321
+/// 4.5.2), and the message's own closing CRLF is the one before the `.` line
+/// (RFC 5321 4.1.1.4), so the message gains no blank line on the wire.
 #[tokio::test]
 async fn a_message_goes_out_whole_over_starttls() {
     let server = RecordingSmtpServer::start();
@@ -99,12 +99,11 @@ async fn a_message_goes_out_whole_over_starttls() {
         ],
         "one envelope per recipient, so a Bcc never shows in another's"
     );
-    let wire = [message.raw.as_slice(), b"\r\n"].concat();
     for delivery in &deliveries {
         assert!(delivery.acknowledged);
         assert_eq!(
             String::from_utf8_lossy(&delivery.data),
-            String::from_utf8_lossy(&wire)
+            String::from_utf8_lossy(&message.raw)
         );
     }
     let logins = server.logins();
@@ -185,9 +184,10 @@ async fn a_refusing_greeting_is_answered_before_any_login() {
 /// A reply over several lines (RFC 5321 4.2.1, `550-` then `550 `) reads as
 /// one sentence, its code once and the enhanced code it repeats once, and a
 /// reply with no text after its code still says what the code means; neither
-/// is lettre's `permanent error (550): ...`. (A code with not even the space
-/// after it is a reply lettre 0.11.19 cannot parse, read as no verdict;
-/// lettre 0.11.24 accepts it.)
+/// is lettre's `permanent error (550): ...`. A bare code with not even the
+/// space after it (`550`) is a reply too and gets the same verdict and words
+/// (PERSO-338): lettre 0.11.19 could not parse it and the send read as no
+/// verdict, parked for a retry.
 #[tokio::test]
 async fn a_multi_line_reply_reads_as_one_sentence_and_a_bare_code_still_says_something() {
     let cases = [
@@ -205,12 +205,27 @@ async fn a_multi_line_reply_reads_as_one_sentence_and_a_bare_code_still_says_som
             "451 4.7.1 Greylisted, see https://example.org/greylisting try again in 5 minutes",
         ),
         (
+            "550-No such user here\r\n550 Please check the address",
+            RecipientVerdict::Rejected,
+            "550 No such user here Please check the address",
+        ),
+        (
             "550 ",
             RecipientVerdict::Rejected,
             "550 (the server gave no reason; a permanent refusal)",
         ),
         (
             "450 ",
+            RecipientVerdict::Retryable,
+            "450 (the server gave no reason; a temporary refusal)",
+        ),
+        (
+            "550",
+            RecipientVerdict::Rejected,
+            "550 (the server gave no reason; a permanent refusal)",
+        ),
+        (
+            "450",
             RecipientVerdict::Retryable,
             "450 (the server gave no reason; a temporary refusal)",
         ),
@@ -280,6 +295,31 @@ async fn a_refused_recipient_leaves_the_others_delivered() {
         .flat_map(|d| d.recipients)
         .collect();
     assert_eq!(delivered, vec!["ada@example.org".to_string()]);
+}
+
+/// A recipient with a quoted local part goes to the address as it was
+/// written (PERSO-338): lettre 0.11.19 sent `"d "@example.org` to
+/// `d@example.org`, another mailbox, and refused `"john doe"@example.org`.
+#[tokio::test]
+async fn a_quoted_local_part_is_sent_to_as_written() {
+    let server = RecordingSmtpServer::start();
+    let recipients = [r#""d "@example.org"#, r#"Ada <"john doe"@example.org>"#];
+    let sent = submit_to(&built("quoted", &recipients), &config(&server, "quoted"))
+        .await
+        .expect("the send went out");
+    assert!(sent.all_succeeded(), "{sent:?}");
+    let delivered: Vec<_> = server
+        .deliveries()
+        .into_iter()
+        .flat_map(|d| d.recipients)
+        .collect();
+    assert_eq!(
+        delivered,
+        vec![
+            r#""d "@example.org"#.to_string(),
+            r#""john doe"@example.org"#.to_string()
+        ]
+    );
 }
 
 /// A login the server refuses is the send's error, in the words the account

@@ -320,9 +320,13 @@ fn refused(reply: &str) -> bool {
 }
 
 /// The address of a `MAIL FROM:<a>` or `RCPT TO:<a>` line, without its
-/// brackets or its parameters.
+/// brackets or its parameters; a bracketed path ends at its `>`, so a quoted
+/// local part with a space in it (`<"d "@example.org>`) stays whole.
 fn path_of(line: &str) -> String {
     let rest = line.split_once(':').map_or("", |(_, rest)| rest).trim();
+    if let Some((path, _)) = rest.strip_prefix('<').and_then(|r| r.split_once('>')) {
+        return path.to_string();
+    }
     let path = rest.split_whitespace().next().unwrap_or_default();
     path.trim_start_matches('<')
         .trim_end_matches('>')

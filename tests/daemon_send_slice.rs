@@ -3870,9 +3870,8 @@ mod wire {
         assert_eq!(sent[0].flags, vec!["\\Seen".to_string()]);
         let filed = sent[0].raw.clone().expect("the copy's bytes");
         assert_eq!(
-            [filed.as_slice(), b"\r\n"].concat(),
-            deliveries[0].data,
-            "the copy is the message the server was given"
+            filed, deliveries[0].data,
+            "the copy is the message the server was given, byte for byte"
         );
         assert_eq!(header(&filed, "Subject"), "Over the wire");
 

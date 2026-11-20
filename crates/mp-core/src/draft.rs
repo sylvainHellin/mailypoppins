@@ -3648,6 +3648,32 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("Invalid email"));
     }
 
+    /// An address with white space outside ASCII in it (a no-break space
+    /// pasted from a web page) is one lettre refuses since 0.11.24, so the
+    /// draft is refused at approval naming the field and the address, never
+    /// approved and its recipient dropped at send time (PERSO-338); a quoted
+    /// local part is an address lettre takes as written.
+    #[test]
+    fn test_validate_draft_refuses_non_ascii_white_space_and_takes_a_quoted_local_part() {
+        let draft = make_draft(
+            "alice@example.com, bob\u{a0}smith@example.com",
+            "Hello",
+            "Body",
+            EmailStatus::Draft,
+        );
+        assert_eq!(
+            validate_draft(&draft).unwrap_err().to_string(),
+            "Invalid email address in 'to': bob\u{a0}smith@example.com"
+        );
+        let draft = make_draft(
+            r#""john doe"@example.com, Ada <"d "@example.org>"#,
+            "Hello",
+            "Body",
+            EmailStatus::Draft,
+        );
+        assert!(validate_draft(&draft).is_ok());
+    }
+
     #[test]
     fn test_validate_draft_multiple_recipients_one_invalid() {
         let draft = make_draft(
