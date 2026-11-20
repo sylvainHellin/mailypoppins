@@ -1167,7 +1167,7 @@ A create and a rename publish the watcher's `signature.changed` for the new file
 Each write publishes `draft.changed`, and a file that does not parse is listed under `skipped`, is an `invalid` row in the bootstrap, and is refused by `draft.approve` and `draft.preview` with `-32010`.
 
 `editor_open` spawns nothing in fixture mode: it journals the path and the resolved command, and answers `fixture: true` with no `pid`.
-`editor_save` appends a line to the file the last `editor_open` named, which moves it to the top of the listing, and publishes `draft.changed`.
+`editor_save` appends a line to the file the last `editor_open` named, which leaves the draft where its creation time lists it, and publishes `draft.changed`.
 `editor_invalid` breaks that file's frontmatter and publishes `draft.invalid`.
 Either is an error before any `editor_open`.
 
