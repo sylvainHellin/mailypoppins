@@ -35,7 +35,7 @@ const draftCommands = [
 ];
 
 const imapCommands = [
-  { command: 'mp sync [options]', description: 'Sync local folders with server; an account with only a server calendar syncs that calendar' },
+  { command: 'mp sync [options]', description: 'Sync local folders with server; an account with only a server calendar syncs that calendar. A sync cut short by mp daemon stop or restart says so and exits 1; ^C cancels it and exits 130' },
   { command: 'mp watch [options]', description: 'Watch mailbox for changes (IMAP IDLE)' },
   { command: 'mp list-mailboxes [--json]', description: 'List every folder on the server with its sync policy (sync, status-only, ignore) and its role, or why it is ignored (--json prints them as JSON on stdout)' },
   { command: 'mp archive <selector>... [--mailbox <name>]', description: 'Archive one or more received emails (server + local); a refusal is reported per selector and the rest still run' },

@@ -237,7 +237,8 @@ The code is pinned here and in the protocol document so the unit that adds the c
 `4` is a daemon that is unavailable or failed to start.
 `mp daemon start` exits 4 when the child dies or never becomes ready, printing the daemon log path, the newest structured log and the `mp daemon run` command to reproduce the failure in the foreground.
 A client command exits 4 when it cannot connect, cannot handshake, cannot start a daemon within the bound, or loses the daemon mid-call, and it never falls back to answering in process.
-Its message carries the socket path, the daemon log path and the `mp daemon run` command, so the user has something to type rather than only a number.
+Its message carries the socket path, the daemon log path and the `mp daemon run` command, so the user has something to type rather than only a number; a command that lost the daemon mid-call says the daemon went away while it ran instead, with the daemon log path and the next step for that command, since a daemon may already be serving again.
+`mp sync` is the one exception to losing the daemon mid-call: when the daemon announced its stop (`daemon.shutting_down`) before the pass ended, the pass was cut short by a stop someone asked for, so `mp sync` prints "Sync of <account> cut short by the daemon stopping: …" on stderr and exits 1, as for a failed account, whether the pass then ends cancelled, failed or with the connection (see `mp daemon stop` above).
 
 `2` is not available to the daemon; `mp watch --timeout` already owns it.
 
