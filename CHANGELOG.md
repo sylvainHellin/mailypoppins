@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Added
+- A running sync can be cancelled from every client: ^C on `mp sync` (exit 130), `sx` in the TUI, and Cancel on the desktop's "Full sync of <account>…" card or its `sx`; the sync stops at its next mailbox or batch, what it already ingested stays, and a sync of the same account already running (the daemon's own or another client's) stops with it, every client saying its sync was cancelled; a calendar-only account's calendar sync has no point to stop at, so `mp sync` and the TUI say they stopped waiting and it finishes in the daemon (PERSO-321).
 - Sync status: a message mp has given up on downloading (the server refuses to send it, or mp could not store it) is listed in `mp sync`'s output, the TUI's sidebar and the desktop app's sidebar, by mailbox and IMAP UID, with the server's words and when mp asks again (a Graph message: on a full sync from the TUI or the desktop app), until a sync brings it in or the server no longer lists it; the server search's second pass narrows a refusal of the whole set to the message refused alone (PERSO-334).
 - Microsoft 365 accounts signed in through Graph now mirror drafts to their Outlook Drafts folder, as IMAP accounts do: a draft written in mp appears in Outlook, a draft started or edited in Outlook reaches mp, and `[accounts.drafts] mirror = false` keeps an account's drafts local (PERSO-182).
 - `mp config open` opens `config.toml` in your editor and has the daemon reload it when the editor closes, printing the reload, the line the daemon refused, or each key it ignored; `sc` in the TUI does the same (PERSO-320).
@@ -163,6 +164,8 @@ All notable changes to this project are documented in this file.
 - `mp config set-password` without `imap` or `smtp` prompts once and stores the password for both logins, a Graph account is pointed to `mp config oauth2-login`, health, the TUI and a held change or send name that command when the account uses one password, the desktop app offers Set password for both, and a set-password that fails on a full or read-only disk leaves the passwords as they were or says which one is stored (PERSO-297).
 
 ### Fixed
+- `mp daemon stop` and `mp daemon restart` mark a stop that cut work short with a warning sign instead of a red cross, since the stop worked (PERSO-322).
+- An IMAP answer mp cannot read is logged and reported in the server's own words, once, instead of as lists of byte values, the watcher's re-read after a change included (PERSO-323).
 - A calendar-only account (a calendar_backend and no mail server) syncs its calendar on its own and shows ready instead of blocked; mp sync and the TUI's sync keys sync that calendar and say what it did or why it failed, instead of skipping the account as local-only (PERSO-318).
 - Outbox: the desktop shows no Retry on a discarded row and warns correctly before discarding a sent invitation; mp outbox list marks a discarded row, and mp outbox discard says when an invitation's copy is kept (PERSO-308).
 - Send: an SMTP refusal reads as the server wrote it, code first ("550 5.1.1 <bob@example.org>: Recipient address rejected: User unknown"), a reply over several lines as one sentence, and a lost connection as "the connection closed before the server answered" (PERSO-336).

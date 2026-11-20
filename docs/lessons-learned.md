@@ -3887,3 +3887,16 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 - `is_local_only()` is true for an account with a `calendar_backend` and no mail server, so every sentence and gate written for "no server" has to ask `syncs_only_a_calendar()` first.
 - `password_from` takes only imap or smtp, so a calendar-only EWS account stores its password under the imap key.
 - A calendar failure is the tick's own error only on a calendar-only account; on a mail account it stays a log line and changes neither the tick's outcome nor the backoff.
+
+## A cancel has to stop the tick the pass joined (2026-11-20, PERSO-321)
+
+- A sync that joins an account tick already running used to ignore its own cancel, so the operation read `cancelled` while the tick ran on; a joiner's cancel now sets the tick's stop flag, and a tick a stop ended (`TickOutcome::stopped`) commits no `sync.completed` and cancels every pass awaiting it.
+- Whatever the scheduler reads after `AccountRuntime::ran_a_body()` (`backlog_owed`, `completed_ticks`) has to be final before that call: it wakes a scheduler that may run on another thread at once, and a backlog cleared after it let a tick fire seconds after a user's cancel; the window has no await point, so no test pins it.
+- A calendar-only account's tick is the calendar sync alone, which asks no `Stop`: a cancel of its pass settles the operation but not the work, so a client's line for it says it stopped waiting, never that the sync was cancelled.
+- With `MAILYPOPPINS_DAEMON_FAKE_COMMIT_HOLD` set, every `sync.quick` or `sync.full` that runs a tick itself waits at its second mailbox for `<method>.release`, up to 10 s; a test that starts one more sync after the held one writes the release file first.
+- A desktop reducer module that imports anything reaching `@/lib/commands` hangs vitest at collection with no output, through the loop pending, commands, the mocked `@/lib/tauri`, `fixture/backend`, `app/outbox`, pending; keep text the reducer needs in a module with no command imports.
+- A CLI that must catch ^C from its first call registers `tokio::signal::unix::signal(SignalKind::interrupt())` up front, since `tokio::signal::ctrl_c()` listens only once first polled.
+
+## An unparsable IMAP answer prints twice through anyhow (2026-11-20, PERSO-323)
+
+- async-imap reports an unparsable answer as an `io::Error` reading `{nom_error:?} during parsing of {text:?}`, which anyhow's `{:#}` prints twice; reads of the server's answer go through `imap_client::words::in_server_words` or `server_words`, and the fake IMAP server's `garble_idlers` and `garble_next_select` reproduce it in a daemon test.
