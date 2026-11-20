@@ -2114,6 +2114,72 @@ mod wire {
         );
     }
 
+    /// `^C` on `mp sync` cancels the pass it is following (PERSO-321): the
+    /// command says so and exits 130, the pass stops at its next boundary
+    /// without committing an outcome, and the mailbox it ingested before the
+    /// stop stays in the store.
+    ///
+    /// The commit-hold hook holds the pass at its second mailbox boundary,
+    /// with INBOX ingested behind it, and the `^C` lands there.
+    #[test]
+    fn ctrl_c_on_mp_sync_cancels_the_pass_and_keeps_what_it_ingested() {
+        use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
+
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![
+                (1, mail("first", "ada@example.org", "First", "one")),
+                (2, mail("second", "bob@example.org", "Second", "two")),
+            ],
+        );
+        let hold = super::support::send_fixture::commit_hold_dir(wire.root());
+        let hold_env = hold.to_string_lossy().into_owned();
+        wire.start(&[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
+
+        let sync = mp_command(wire.root())
+            .env(REQUIRE_ENV, "1")
+            .arg("sync")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn mp sync");
+        wait_for("the pass to be held at its second mailbox", || {
+            hold.join("sync.quick.held").exists()
+        });
+        // SAFETY: a signal to the child this test spawned and still holds.
+        unsafe { libc::kill(sync.id() as i32, libc::SIGINT) };
+        let out = sync.wait_with_output().expect("mp sync's output");
+
+        assert_eq!(
+            out.status.code(),
+            Some(130),
+            "stdout: {}\nstderr: {}",
+            stdout(&out),
+            stderr(&out)
+        );
+        assert_eq!(
+            stdout(&out),
+            format!(
+                "⚠ Sync of {ACCOUNT} cancelled: what it already ingested stays, \
+                 and the next sync goes on from there\n"
+            )
+        );
+        wait_for("the pass to drop its outcome", || {
+            hold.join("sync.quick.dropped").exists()
+        });
+        assert!(
+            !hold.join("sync.quick.committed").exists(),
+            "the pass walked on past its cancel"
+        );
+        assert_eq!(
+            wire.local("inbox").len(),
+            2,
+            "the mailbox ingested before the cancel stays"
+        );
+    }
+
     /// The first line of the daemon's log that holds `needle`, waited for.
     fn log_line(wire: &WireRoot, needle: &str) -> String {
         let mut line = String::new();
