@@ -3,8 +3,8 @@
 //! The half of the contract that only two live connections can express. The
 //! in-process half is `src/tui/hold_tests.rs`: the wire vocabulary, the status
 //! line, the `u` key and the residue. Here the daemon is a real `mp daemon
-//! run` over a seeded root, the transport is the fake one whose ledger records
-//! every submission, and the clients are two `mp_client::Connection`s that
+//! run` over a seeded root whose default account is on the fake SMTP and IMAP
+//! servers, which record every submission, and the clients are two `mp_client::Connection`s that
 //! handshake and bootstrap like the TUI does.
 //!
 //! # What this file pins
@@ -13,9 +13,9 @@
 //!   client **B** as a `send.hold_started` event, and `send.hold_status`
 //!   answers B the same object.
 //! - Cancellation from a window that did not send: **B** calls
-//!   `send.cancel_hold` on A's operation id, nothing reaches the transport,
+//!   `send.cancel_hold` on A's operation id, nothing reaches the servers,
 //!   and the draft stays `approved` with its file on disk.
-//! - A hold nobody cancels fires: the ledger gets one submission per
+//! - A hold nobody cancels fires: the SMTP server gets one submission per
 //!   recipient of the draft and the draft is retired, file and all.
 //! - A send outlives the client that asked for it: **A** disconnects mid-hold
 //!   while **B** watches, and the hold still fires. A durable operation is not
@@ -26,7 +26,7 @@
 //!   `send.hold_status` empty.
 //! - The CLI still bypasses the hold: `mp send-approved -y` against a
 //!   configured twenty-second window returns in well under it with the
-//!   submission already in the ledger, and prints the line the pre-daemon
+//!   submission already on the SMTP server, and prints the line the pre-daemon
 //!   binary printed (`send_fixture::approved_summary`, which is
 //!   `mp_client::format::send_approved_summary`'s wording and the oracle's).
 //!
@@ -35,7 +35,7 @@
 //! **The last client exiting mid-hold.** That is `tests/phase5_undo_send_hold.rs`,
 //! the fifth oracle of the Phase 5 parity gate, which already asserts it from
 //! the outside: approve, drop the connection, wait past the window, and find
-//! the draft approved, the outbox untouched and the ledger empty. Duplicating
+//! the draft approved, the outbox untouched and nothing sent. Duplicating
 //! it here would give two files one sentence to keep true. The plan's rule -
 //! *"When the last client exits mid-hold the daemon cancels the hold and
 //! leaves the draft approved"* - is P6-U3/P6-U4's to implement; what P6-U2
@@ -48,8 +48,8 @@
 //! same arithmetic `tests/phase5_undo_send_hold.rs` uses: long enough that
 //! "mid-hold" is a real interval on a loaded machine, short enough that the
 //! file costs seconds rather than minutes. No row polls a clock to decide what
-//! the daemon did; the fired rows sleep past the window and then read the
-//! ledger, and the event rows block on `next_notification` with a deadline.
+//! the daemon did; the fired rows sleep past the window and then read what
+//! the servers were given, and the event rows block on `next_notification` with a deadline.
 
 mod support;
 
@@ -65,6 +65,7 @@ use mailypoppins::daemon::methods::send::SEND_METHOD_SPECS;
 
 use support::parity::{socket_path, DaemonFixture};
 use support::send_fixture as fixture;
+use support::wire_fixture::WireServers;
 
 /// The hold window every fixture configures, in seconds.
 const HOLD_SECS: u64 = 2;
@@ -96,34 +97,28 @@ fn past_the_window() -> Duration {
 /// `send_fixture`'s `widen_approved_draft` adds (`fixture::REJECTED`).
 const APPROVED_RECIPIENTS: [&str; 2] = [fixture::REJECTED, "ivana@example.com"];
 
-/// The addresses the transport was handed under the draft's own Message-ID,
-/// sorted.
+/// The addresses the SMTP server took the draft's message for, sorted: the
+/// first message it took that no seeded row carries.
 ///
-/// Counted by Message-ID rather than by the ledger's length, the way
-/// `tests/daemon_send_slice.rs` counts a send's Sent copy: one send of this
-/// draft is four ledger lines and never one. The fake transport writes one
-/// `Submit` per recipient and the widened draft has two; the send files its
-/// own Sent copy; and it drains the account's outbox on its way out, so the
-/// seeded row parked on its APPEND (`fixture::APPENDING_ROW`) files its copy
-/// in the same run. "Sent exactly once" is therefore
-/// [`APPROVED_RECIPIENTS`] with nothing repeated.
-fn draft_submissions(events: &[fixture::TransportEvent]) -> Vec<String> {
-    let Some(mid) = events.iter().find_map(|event| match event {
-        fixture::TransportEvent::Submit { message_id, .. } => Some(message_id.clone()),
-        _ => None,
-    }) else {
+/// Counted by Message-ID rather than by every recipient the server took, the
+/// way `tests/daemon_send_slice.rs` counts a send's Sent copy: the client sends
+/// one transaction per recipient and the widened draft has two, and the
+/// daemon's first drain sends the seeded queued row
+/// ([`WireServers::await_startup_drain`]). "Sent exactly once" is therefore [`APPROVED_RECIPIENTS`] with
+/// nothing repeated.
+fn draft_submissions(wire: &WireServers) -> Vec<String> {
+    let Some(mid) = wire
+        .submitted_message_ids(&fixture::SEEDED_MIDS)
+        .first()
+        .cloned()
+    else {
         return Vec::new();
     };
-    let mut addresses: Vec<String> = events
-        .iter()
-        .filter_map(|event| match event {
-            fixture::TransportEvent::Submit {
-                message_id,
-                address,
-                ..
-            } if *message_id == mid => Some(address.clone()),
-            _ => None,
-        })
+    let submissions = wire.submissions();
+    let mut addresses: Vec<String> = submissions
+        .into_iter()
+        .filter(|(message_id, _, _)| *message_id == mid)
+        .map(|(_, address, _)| address)
         .collect();
     addresses.sort();
     addresses
@@ -148,6 +143,18 @@ fn seed(root: &Path, secs: u64) {
         format!("[email]\nsend_hold_secs = {secs}\n\n{existing}"),
     )
     .expect("write config.toml");
+}
+
+/// Move the default account of the seeded `root` onto the fake SMTP and IMAP
+/// servers (PERSO-331), start the daemon over it and wait for its first
+/// drain to send what the seeded outbox owed
+/// ([`WireServers::await_startup_drain`]).
+fn start_wired(root: &Path) -> (WireServers, DaemonFixture) {
+    let wire = WireServers::start();
+    wire.wire(root, fixture::ACCOUNT);
+    let daemon = DaemonFixture::start_with(root, None, &[]);
+    wire.await_startup_drain(root, fixture::ACCOUNT);
+    (wire, daemon)
 }
 
 /// A client of the kind the TUI is: handshaken, bootstrapped, subscribed.
@@ -315,12 +322,7 @@ fn operation_cancel_on_a_held_send_stops_the_send() {
     let tmp = tempfile::tempdir().expect("a temporary hold root");
     let root = tmp.path();
     seed(root, HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (wire, daemon) = start_wired(root);
 
     let kinds = block_on(async {
         let mut a = tui_client(root).await;
@@ -338,10 +340,10 @@ fn operation_cancel_on_a_held_send_stops_the_send() {
         !kinds.iter().any(|kind| kind == "send.hold_fired"),
         "a cancelled hold never fires: {kinds:?}"
     );
-    let events = fixture::transport_events(&log);
     assert!(
-        draft_submissions(&events).is_empty(),
-        "nothing reached the transport: {events:?}"
+        draft_submissions(&wire).is_empty(),
+        "nothing reached the SMTP server: {:?}",
+        wire.submissions()
     );
 
     daemon.stop();
@@ -360,12 +362,7 @@ fn a_second_client_sees_the_countdown_and_cancels_the_send() {
     let tmp = tempfile::tempdir().expect("a temporary hold root");
     let root = tmp.path();
     seed(root, HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (wire, daemon) = start_wired(root);
 
     block_on(async {
         let mut a = tui_client(root).await;
@@ -477,11 +474,11 @@ fn a_second_client_sees_the_countdown_and_cancels_the_send() {
         pending.is_empty(),
         "and the daemon is carrying no hold for it: {pending:?}"
     );
-    let events = fixture::transport_events(&log);
     assert!(
-        events.is_empty(),
-        "nothing reached the transport, and the fake one recorded {} event(s): {events:?}",
-        events.len()
+        wire.untouched_but_for(&fixture::SEEDED_MIDS),
+        "nothing reached the servers: {:?}, {:?}",
+        wire.submissions(),
+        wire.imap.contents(support::wire_fixture::SENT)
     );
     let file = fixture::drafts_dir(root, fixture::ACCOUNT).join(fixture::APPROVED_FILE);
     assert!(
@@ -500,18 +497,13 @@ fn a_second_client_sees_the_countdown_and_cancels_the_send() {
 /// Nobody presses `u`, so the window elapses and the draft goes.
 ///
 /// The positive half of every negative assertion in this file: the same
-/// fixture, the same ledger and the same draft, with nothing cancelling.
+/// fixture, the same servers and the same draft, with nothing cancelling.
 #[test]
 fn a_hold_nobody_cancels_fires_and_retires_the_draft() {
     let tmp = tempfile::tempdir().expect("a temporary hold root");
     let root = tmp.path();
     seed(root, HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (wire, daemon) = start_wired(root);
 
     let operation = block_on(async {
         let mut a = tui_client(root).await;
@@ -535,11 +527,11 @@ fn a_hold_nobody_cancels_fires_and_retires_the_draft() {
         )
     });
 
-    let events = fixture::transport_events(&log);
     assert_eq!(
-        draft_submissions(&events),
+        draft_submissions(&wire),
         APPROVED_RECIPIENTS,
-        "exactly one submission per recipient reached the transport for {operation}: {events:?}"
+        "exactly one submission per recipient reached the SMTP server for {operation}: {:?}",
+        wire.submissions()
     );
     assert_eq!(
         status, None,
@@ -576,12 +568,7 @@ fn the_sender_may_close_its_window_while_another_client_watches() {
     let tmp = tempfile::tempdir().expect("a temporary hold root");
     let root = tmp.path();
     seed(root, HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (wire, daemon) = start_wired(root);
 
     block_on(async {
         let mut b = tui_client(root).await;
@@ -600,11 +587,11 @@ fn the_sender_may_close_its_window_while_another_client_watches() {
 
     std::thread::sleep(past_the_window());
 
-    let events = fixture::transport_events(&log);
     assert_eq!(
-        draft_submissions(&events),
+        draft_submissions(&wire),
         APPROVED_RECIPIENTS,
-        "the send the user confirmed went out, once per recipient: {events:?}"
+        "the send the user confirmed went out, once per recipient: {:?}",
+        wire.submissions()
     );
 
     daemon.stop();
@@ -625,12 +612,7 @@ fn a_zero_window_sends_at_once_and_publishes_no_hold_event() {
     let tmp = tempfile::tempdir().expect("a temporary hold root");
     let root = tmp.path();
     seed(root, 0);
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (wire, daemon) = start_wired(root);
 
     block_on(async {
         let mut conn = tui_client(root).await;
@@ -662,11 +644,11 @@ fn a_zero_window_sends_at_once_and_publishes_no_hold_event() {
     });
 
     std::thread::sleep(past_the_window());
-    let events = fixture::transport_events(&log);
     assert_eq!(
-        draft_submissions(&events),
+        draft_submissions(&wire),
         APPROVED_RECIPIENTS,
-        "and the message went once per recipient, which is what the opt-out is for: {events:?}"
+        "and the message went once per recipient, which is what the opt-out is for: {:?}",
+        wire.submissions()
     );
 
     daemon.stop();
@@ -695,12 +677,7 @@ fn the_cli_send_approved_still_bypasses_the_hold() {
     let tmp = tempfile::tempdir().expect("a temporary hold root");
     let root = tmp.path();
     seed(root, CLI_HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (wire, daemon) = start_wired(root);
 
     let started = Instant::now();
     let out = daemon.mp_routed(&["send-approved", "-y"]);
@@ -723,10 +700,9 @@ fn the_cli_send_approved_still_bypasses_the_hold() {
         stdout.contains(&fixture::approved_summary(fixture::ACCOUNT, 1, 0)),
         "and it printed the summary the oracle printed, not a countdown:\n{stdout}"
     );
-    let events = fixture::transport_events(&log);
     assert!(
-        !events.is_empty(),
-        "the message was already on its way when the command exited: {events:?}"
+        !wire.submissions().is_empty(),
+        "the message was already on its way when the command exited"
     );
     let pending = block_on(async {
         let mut conn = tui_client(root).await;
@@ -756,12 +732,7 @@ fn cancelling_a_hold_nobody_holds_is_refused() {
     let tmp = tempfile::tempdir().expect("a temporary hold root");
     let root = tmp.path();
     seed(root, HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (_wire, daemon) = start_wired(root);
 
     block_on(async {
         let mut conn = tui_client(root).await;
