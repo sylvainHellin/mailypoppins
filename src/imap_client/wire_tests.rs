@@ -347,6 +347,43 @@ async fn a_body_chunk_refused_whole_is_narrowed_to_the_message_refused_alone() {
     session.logout().await.ok();
 }
 
+/// PERSO-333 review: a quick pass leaves a message given up on alone until
+/// its retry is due, and a full sync, which only a user asks for, asks for
+/// it again at once: a fix on the server or in a new mp need not wait a day.
+#[tokio::test]
+async fn a_full_sync_asks_again_for_a_message_given_up_on() {
+    let server = server(&["one", "two", "three"]);
+    let mut session = super::open_imap_session(&config(&server)).await.unwrap();
+    let known = || crate::ingest::KnownUids {
+        given_up: [(2, i64::MAX)].into_iter().collect(),
+        ..crate::ingest::KnownUids::default()
+    };
+    let caps = super::pool::ServerCaps::default();
+    let asked = |plan: &super::fetch::BodyPlan| -> Vec<u32> {
+        let mut uids: Vec<u32> = plan.chunks.iter().flatten().copied().collect();
+        uids.sort_unstable();
+        uids
+    };
+
+    let (_, quick) =
+        super::fetch::list_mailbox_on_session(&mut session, "INBOX", Some(50), known(), caps)
+            .await
+            .unwrap();
+    assert_eq!(asked(&quick), vec![1, 3], "a quick pass leaves UID 2 alone");
+
+    let (_, full) = super::fetch::list_mailbox_on_session(
+        &mut session,
+        "INBOX",
+        Some(usize::MAX),
+        known(),
+        caps,
+    )
+    .await
+    .unwrap();
+    assert_eq!(asked(&full), vec![1, 2, 3], "a full sync asks for it again");
+    session.logout().await.ok();
+}
+
 /// A one-message chunk the server refuses is that message's refusal: there
 /// is nothing narrower to ask.
 #[tokio::test]
