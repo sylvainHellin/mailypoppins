@@ -111,6 +111,7 @@ use support::parity::{
     DaemonFixture,
 };
 use support::send_fixture as fixture;
+use support::wire_fixture::WireServers;
 
 /// The grace a `daemon.stop` that named none gets, in seconds.
 const DEFAULT_GRACE_SECS: u64 = 10;
@@ -183,13 +184,15 @@ fn daemon_with_operations(root: &Path) -> DaemonFixture {
     DaemonFixture::start_with(root, None, &[(FAKE_OPERATIONS_ENV, "1")])
 }
 
-/// A daemon over `root` whose transport is the fake one writing to `log`.
-fn daemon_with_transport(root: &Path, log: &Path) -> DaemonFixture {
-    DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(log))],
-    )
+/// A daemon over the seeded `root` whose default account is on the fake SMTP
+/// and IMAP servers (PERSO-331), once its first drain has sent what the
+/// seeded outbox owed ([`WireServers::await_startup_drain`]).
+fn daemon_wired(root: &Path) -> (WireServers, DaemonFixture) {
+    let wire = WireServers::start();
+    wire.wire(root, fixture::ACCOUNT);
+    let daemon = DaemonFixture::start_with(root, None, &[]);
+    wire.await_startup_drain(root, fixture::ACCOUNT);
+    (wire, daemon)
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -971,7 +974,7 @@ fn a_clean_stop_prints_the_line_it_has_always_printed() {
 ///
 /// So the hold is cancelled at step 2, the clients are told with the event
 /// they already render, the draft is exactly what the approve left, the
-/// transport hears nothing, and the hold is in neither `pending` nor
+/// servers hear nothing, and the hold is in neither `pending` nor
 /// `unsettled`: it was settled, not abandoned.
 ///
 /// The watcher stays connected throughout, so the last-client rule
@@ -981,8 +984,7 @@ fn a_stop_cancels_an_armed_hold_and_leaves_the_draft_approved() {
     let tmp = bare_root();
     let root = tmp.path();
     seed_with_hold(root, HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = daemon_with_transport(root, &log);
+    let (wire, daemon) = daemon_wired(root);
 
     let (operation, answer, report) = block_on(async {
         let mut sender = tui_client(root).await;
@@ -1043,11 +1045,10 @@ fn a_stop_cancels_an_armed_hold_and_leaves_the_draft_approved() {
         "and leaves it exactly as the approve left it, ready to send again ({operation}):\n\
          {document}"
     );
-    let events = fixture::transport_events(&log);
     assert!(
-        events.is_empty(),
-        "nothing reached the transport, and the fake one recorded {} event(s): {events:?}",
-        events.len()
+        wire.untouched_but_for(&fixture::SEEDED_MIDS),
+        "nothing reached the servers but the seeded rows: {:?}",
+        wire.submissions()
     );
 }
 
@@ -1121,8 +1122,7 @@ fn sigterm_ends_the_daemon_exactly_as_daemon_stop_does() {
     let tmp = bare_root();
     let root = tmp.path();
     seed_with_hold(root, HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = daemon_with_transport(root, &log);
+    let (wire, daemon) = daemon_wired(root);
     let pid = daemon.pid();
 
     let payload = block_on(async {
@@ -1166,8 +1166,9 @@ fn sigterm_ends_the_daemon_exactly_as_daemon_stop_does() {
         "and the draft the hold was about is still approved:\n{document}"
     );
     assert!(
-        fixture::transport_events(&log).is_empty(),
-        "with nothing sent behind the user's back"
+        wire.untouched_but_for(&fixture::SEEDED_MIDS),
+        "with nothing sent behind the user's back: {:?}",
+        wire.submissions()
     );
 }
 
@@ -1194,8 +1195,7 @@ fn a_client_that_bootstraps_mid_hold_finds_the_hold_in_its_snapshot() {
     let tmp = bare_root();
     let root = tmp.path();
     seed_with_hold(root, HOLD_SECS);
-    let log = fixture::transport_log(root);
-    let daemon = daemon_with_transport(root, &log);
+    let (_wire, daemon) = daemon_wired(root);
 
     block_on(async {
         let mut sender = tui_client(root).await;
