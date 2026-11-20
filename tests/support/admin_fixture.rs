@@ -22,9 +22,9 @@
 //!
 //! Building on `send_fixture` rather than beside it keeps one definition of
 //! "the Graph account" - which `ANO-4` needs twice over, once for
-//! `mp send --invite` and once for `mp invite accept` - and one definition of
-//! the fake transport, which is what makes a *successful* RSVP reachable
-//! without an SMTP server.
+//! `mp send --invite` and once for `mp invite accept`. A *successful* RSVP
+//! needs a server to submit to: a routed-side row moves [`ACCOUNT`] onto the
+//! fake SMTP and IMAP servers (`super::wire_fixture::WireServers`, PERSO-331).
 //!
 //! # Why the contact index is prebuilt, and built by the oracle
 //!
@@ -53,7 +53,7 @@
 //!
 //! - the contact index's `built_at` is fixed by building the cache once, above;
 //! - an RSVP mints a `Message-ID`, and the only row that sends one is a
-//!   routed-side assertion through the fake transport, never a parity row.
+//!   routed-side assertion over the fake servers, never a parity row.
 //!
 //! `mp store gc` reports byte counts of the seeded blobs, which are literals
 //! because the seeded attachments are literals.
@@ -254,34 +254,11 @@ pub fn selector(account: &str, message_id: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The fake transport
+// The pristine copy
 // ---------------------------------------------------------------------------
-
-/// The daemon-side hook that serves the RSVP's SMTP submission and its
-/// Sent-mailbox APPEND in process. Set on the daemon, never on a client.
-pub const FAKE_TRANSPORT_ENV: &str = send_fixture::FAKE_TRANSPORT_ENV;
-
-/// One event the fake transport recorded.
-pub type TransportEvent = send_fixture::TransportEvent;
 
 /// The tree-restoring guard the mutating parity rows take a copy with.
 pub type Pristine = send_fixture::Pristine;
-
-/// The hook's value for a transport that accepts everything and files the
-/// copy, writing its ledger to `log`.
-pub fn fake_transport(log: &Path) -> String {
-    send_fixture::fake_transport(log)
-}
-
-/// The ledger file the fake transport writes, under a root the test owns.
-pub fn transport_log(root: &Path) -> PathBuf {
-    send_fixture::transport_log(root)
-}
-
-/// Every event the fake transport recorded, in the order it wrote them.
-pub fn transport_events(log: &Path) -> Vec<TransportEvent> {
-    send_fixture::transport_events(log)
-}
 
 // ---------------------------------------------------------------------------
 // Seeding

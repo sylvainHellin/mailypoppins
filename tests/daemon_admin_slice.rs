@@ -272,9 +272,10 @@
 //!   owes them is that the decision reaches the client verbatim, which
 //!   [`store_gc_reports_the_decision_the_sweep_took`] asserts by name.
 //! - **A real SMTP conversation.** As in the send slice, the one available
-//!   substitute is the daemon-side [`FAKE_TRANSPORT_ENV`] hook, and every row
-//!   that uses it is a routed-side assertion rather than a parity row, because
-//!   the pre-daemon oracle cannot see the hook.
+//!   substitute is the fake SMTP and IMAP servers of `tests/support/`, which
+//!   the default account is moved onto ([`Slice::wired`], PERSO-331), and every
+//!   row that uses them is a routed-side assertion rather than a parity row,
+//!   because the pre-daemon oracle has no account on them.
 //! - **`mp config init`'s and `mp config add-account`'s wizards past their
 //!   first prompt.** Both reach for a network connection a few answers in
 //!   (`test_imap_connection`), so a run with a closed stdin that answered
@@ -324,6 +325,7 @@ use support::parity::{
     without_retired_oauth2_mode, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 use support::send_fixture::{all_rows, await_commit_marker, commit_hold_dir};
+use support::wire_fixture::WireServers;
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
 const DEADLINE: Duration = Duration::from_secs(20);
@@ -413,6 +415,9 @@ const DEVICE_CODE_BLOCK: &str = "\n  To sign in, open a browser and go to:\n\n  
 struct Slice {
     daemon: Option<DaemonFixture>,
     env: Vec<(String, String)>,
+    /// The fake servers the default account submits to and files its Sent
+    /// copies in, for a routed-side row whose RSVP has to go out.
+    wire: Option<WireServers>,
     tmp: TempDir,
 }
 
@@ -427,7 +432,7 @@ impl Slice {
     ///
     /// `sandbox_env` removes every entry of `DAEMON_ENV_HOOKS`, which is what
     /// keeps a developer's exported variable out of a parity comparison, so a
-    /// test that wants the fake transport has to ask for it here.
+    /// test that wants a hook has to ask for it here.
     fn start_with(env: &[(&str, &str)]) -> Slice {
         let tmp = TempDir::new().expect("a temporary admin-slice root");
         fixture::seed(tmp.path());
@@ -441,61 +446,59 @@ impl Slice {
         Slice {
             daemon: Some(daemon),
             env: owned,
+            wire: None,
             tmp,
         }
     }
 
-    /// A root whose daemon serves the RSVP's SMTP submission and its
-    /// Sent-mailbox APPEND in process.
-    ///
-    /// The hook's value names the ledger file, which lives under the root, so
-    /// it can only be built once the root exists.
-    fn with_fake_transport() -> Slice {
+    /// A root whose default account submits the RSVP to the fake SMTP server
+    /// and files its Sent copy on the fake IMAP server (PERSO-331).
+    fn wired() -> Slice {
+        Slice::wired_with(|_| Vec::new())
+    }
+
+    /// The same, with the hooks `env` builds from the root on top of the
+    /// sandbox.
+    fn wired_with(env: impl FnOnce(&Path) -> Vec<(String, String)>) -> Slice {
         let tmp = TempDir::new().expect("a temporary admin-slice root");
         fixture::seed(tmp.path());
         pin_font_size(tmp.path());
         pin_theme(tmp.path());
-        let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
-        let daemon =
-            DaemonFixture::start_with(tmp.path(), None, &[(fixture::FAKE_TRANSPORT_ENV, &hook)]);
+        let servers = WireServers::start();
+        servers.wire(tmp.path(), fixture::ACCOUNT);
+        let env = env(tmp.path());
+        let borrowed: Vec<(&str, &str)> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let daemon = DaemonFixture::start_with(tmp.path(), None, &borrowed);
         Slice {
             daemon: Some(daemon),
-            env: vec![(fixture::FAKE_TRANSPORT_ENV.to_string(), hook)],
+            env,
+            wire: Some(servers),
             tmp,
         }
     }
 
-    /// The fake transport, plus the hook that holds every commit point until
-    /// its operation is cancelled, its markers in [`commit_hold_dir`].
+    /// A wired root plus the hook that holds every commit point until its
+    /// operation is cancelled, its markers in [`commit_hold_dir`].
     fn with_commit_hold() -> Slice {
-        let tmp = TempDir::new().expect("a temporary admin-slice root");
-        fixture::seed(tmp.path());
-        pin_font_size(tmp.path());
-        pin_theme(tmp.path());
-        let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
-        let hold = commit_hold_dir(tmp.path()).to_string_lossy().into_owned();
-        let env = [
-            (fixture::FAKE_TRANSPORT_ENV, hook.as_str()),
-            (FAKE_COMMIT_HOLD_ENV, hold.as_str()),
-        ];
-        let daemon = DaemonFixture::start_with(tmp.path(), None, &env);
-        Slice {
-            daemon: Some(daemon),
-            env: env
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                .collect(),
-            tmp,
-        }
+        Slice::wired_with(|root| {
+            let hold = commit_hold_dir(root);
+            vec![(
+                FAKE_COMMIT_HOLD_ENV.to_string(),
+                hold.to_string_lossy().into_owned(),
+            )]
+        })
     }
 
     fn root(&self) -> &Path {
         self.tmp.path()
     }
 
-    /// The fake transport's ledger under this root.
-    fn log(&self) -> std::path::PathBuf {
-        fixture::transport_log(self.root())
+    /// The fake servers of a wired root.
+    fn wire(&self) -> &WireServers {
+        self.wire
+            .as_ref()
+            .expect("this row's root is wired to the fake servers")
     }
 
     fn daemon(&self) -> &DaemonFixture {
@@ -1617,15 +1620,15 @@ async fn calendar_rsvp_refuses_what_it_cannot_answer() {
     assert_eq!(cross.code, INVALID_PARAMS);
 }
 
-/// The success path, through the daemon-side fake transport: an RSVP that
+/// The success path, over the fake SMTP and IMAP servers: an RSVP that
 /// really goes out, in all three responses.
 ///
-/// **Routed-side only.** The hook is the daemon's and the pre-daemon oracle
-/// cannot see it, so this is an assertion about the daemon rather than a
-/// parity row.
+/// **Routed-side only.** The pre-daemon oracle has no account on those
+/// servers, so this is an assertion about the daemon rather than a parity
+/// row.
 #[tokio::test]
 async fn a_routed_rsvp_submits_the_reply_to_the_organizer() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired();
     let mut conn = slice.connect().await;
 
     let status = run_operation(
@@ -1665,15 +1668,13 @@ async fn a_routed_rsvp_submits_the_reply_to_the_organizer() {
     );
     assert_path_free("calendar.rsvp", result);
 
-    // And the transport really saw it: one submission, to the organizer.
-    let events = fixture::transport_events(&slice.log());
+    // And the server really took it: one submission, to the organizer.
+    let submissions = slice.wire().submissions();
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            fixture::TransportEvent::Submit { address, accepted, .. }
-                if address.contains(fixture::ORGANIZER) && *accepted
-        )),
-        "the organizer was the recipient of the submission: {events:?}"
+        submissions.iter().any(
+            |(_, address, acknowledged)| address.contains(fixture::ORGANIZER) && *acknowledged
+        ),
+        "the organizer was the recipient of the submission: {submissions:?}"
     );
 }
 
@@ -1682,7 +1683,7 @@ async fn a_routed_rsvp_submits_the_reply_to_the_organizer() {
 /// send, rather than only after the next rebuild.
 #[tokio::test]
 async fn a_routed_rsvp_counts_the_organizer_as_sent_to() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired();
     let mut watcher = slice.connect().await;
     call(&mut watcher, "state.bootstrap", json!({})).await;
     let mut conn = slice.connect().await;
@@ -1730,7 +1731,7 @@ async fn a_routed_rsvp_counts_the_organizer_as_sent_to() {
     assert_eq!(changed["account"], fixture::ACCOUNT, "{changed}");
 }
 
-/// An RSVP cancelled before its submission is dropped: the transport sees
+/// An RSVP cancelled before its submission is dropped: the servers see
 /// nothing and no outbox row is left behind.
 #[tokio::test]
 async fn an_rsvp_cancelled_before_its_submission_sends_nothing() {
@@ -1752,10 +1753,10 @@ async fn an_rsvp_cancelled_before_its_submission_sends_nothing() {
     let id = operation_id(&started);
     cancel_at_commit_point(&mut conn, slice.root(), "calendar.rsvp", &id).await;
 
-    let events = fixture::transport_events(&slice.log());
     assert!(
-        events.is_empty(),
-        "a cancelled RSVP reached the transport: {events:?}"
+        slice.wire().untouched(),
+        "a cancelled RSVP reached the servers: {:?}",
+        slice.wire().smtp.rcpts()
     );
     assert_eq!(
         all_rows(slice.root(), fixture::ACCOUNT),
@@ -1767,7 +1768,7 @@ async fn an_rsvp_cancelled_before_its_submission_sends_nothing() {
 /// The other two responses, and the verb each puts in the subject.
 #[tokio::test]
 async fn a_routed_rsvp_carries_the_verb_of_each_response() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired();
     let mut conn = slice.connect().await;
 
     for (response, verb) in [("tentative", "Tentative"), ("decline", "Declined")] {
