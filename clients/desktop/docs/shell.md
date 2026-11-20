@@ -462,9 +462,13 @@ The Channel carries output as raw bytes (an `ArrayBuffer` per frame) that go to 
 - Colours follow the palette on `<html>` and change with it, and the font is the app's `font-mono` at `text-sm` followed by the Nerd Fonts symbols the app ships, for the icons in the private use areas ([design-tokens.md](design-tokens.md), "Terminal").
 - The terminal font setting (Settings, "Terminal font") puts its family, in double quotes, before the app's stack and its size in place of `text-sm`; the symbols stay last whatever the setting.
   The editor's pane and the agent's pane take it from `state.terminalFont`, which `src/app/terminalFont.ts` reads from `desktop.json` at startup.
-- A changed setting reaches every open pane at once: the pane sets xterm's `fontFamily` and `fontSize`, refits, sends the new columns and rows to the session through the resize path, and fetches the symbols font at the new size and redraws its glyphs as at mount.
-- The symbols font is fetched when a pane mounts, by `document.fonts.load` with one of its characters, since canvas text never starts the download of a `unicode-range` face; the spawn does not wait for it, and once it arrives the pane clears the WebGL renderer's glyph atlas and redraws every row, so an icon drawn before it does not stay blank.
-  A failed load leaves the pane working, with a warning in the console.
+- A changed setting reaches every open pane at once: the pane sets xterm's `fontFamily` and `fontSize`, refits, sends the new columns and rows to the session through the resize path, and asks for the symbols font at the new size as at mount.
+- The symbols font is fetched when a pane mounts, by `document.fonts.load` with one of its characters, since canvas text never starts the download of a `unicode-range` face; the spawn does not wait for it.
+  `symbolsFontArrival` in `terminalTheme.ts` keeps one load per size for the page, shared by every pane, and loads nothing when `document.fonts.check` finds the font there already or an earlier load at that size has arrived.
+  When the font arrives during a pane's life at the size the pane draws at, the pane clears the WebGL renderer's glyph atlas and redraws every row, so an icon drawn before it does not stay blank.
+  The WebGL addon shares one atlas among the terminals of one font, size and palette, and a clear resets only the clearing terminal's cells, so a pane that finds the font there already never clears: a clear then would leave the hidden panes the shell keeps mounted drawing from emptied cells.
+  The panes waiting on one arrival clear in the same microtask batch, before a frame: the first empties the shared atlas and the others, finding it empty, reset only their own cells.
+  A failed load leaves the pane working, with one warning in the console, and is not retried.
 - The spawn carries the palette painted then (`currentScheme` in `src/app/theme.ts`, `dark` or `light`, a `system` theme already resolved), and the editor follows it: see "The embedded editor", "The editor's colours".
 
 While the terminal has the focus, every key is the editor's, Escape and Tab included: `isEditable` counts any element inside `[data-slot="terminal"]` as editable, and the keymap returns before its Escape rule.

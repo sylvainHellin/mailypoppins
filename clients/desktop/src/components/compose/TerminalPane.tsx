@@ -15,7 +15,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import "@/components/compose/terminal-font.css";
 import { tauriBridge, type DraftRun, type TerminalBridge, type TerminalExit, type TerminalStarted } from "@/lib/terminal";
-import { loadSymbolsFont, terminalFont, terminalTheme } from "@/components/compose/terminalTheme";
+import { symbolsFontArrival, terminalFont, terminalTheme } from "@/components/compose/terminalTheme";
 import { currentScheme } from "@/app/theme";
 import { DEFAULT_TERMINAL_FONT, type TerminalFontSetting } from "@/lib/terminal-font";
 
@@ -119,16 +119,19 @@ export function TerminalPane<R extends object = DraftRun>({
 
     // The WebGL renderer caches each glyph in a texture atlas the first time
     // it draws it, so an icon drawn before the symbols font arrived stays a
-    // blank cell until the atlas is rebuilt. The spawn does not wait for it.
+    // blank cell until the atlas is rebuilt. The atlas is shared by every
+    // terminal of one font, size and palette, and a rebuild leaves the others
+    // drawing from emptied cells: only the font's arrival at the size the pane
+    // draws at rebuilds it. Every pane waiting on that arrival rebuilds in the
+    // same microtask batch, before a frame, so the first empties the atlas and
+    // the others, finding it empty, only reset their own cells.
+    // The spawn does not wait for the font.
     const loadSymbols = (size: number) =>
-      loadSymbolsFont(size).then(
-        () => {
-          if (disposed) return;
-          term.clearTextureAtlas();
-          term.refresh(0, term.rows - 1);
-        },
-        (e: unknown) => console.warn("the terminal's symbols font did not load; Nerd Font icons draw blank", e),
-      );
+      symbolsFontArrival(size)?.then((arrived) => {
+        if (!arrived || disposed || term.options.fontSize !== size) return;
+        term.clearTextureAtlas();
+        term.refresh(0, term.rows - 1);
+      });
     void loadSymbols(font.fontSize);
 
     const sync = () => {

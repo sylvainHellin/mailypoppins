@@ -79,13 +79,48 @@ export function terminalFont(
 }
 
 /**
- * Fetches the symbols font. Text drawn on a canvas, as xterm's WebGL renderer
- * draws it, never starts the download of a `unicode-range` face, so the pane
- * asks for it by name with a character of the range. Resolves at once where
- * the page has no FontFaceSet (jsdom); rejects when the file fails to load.
+ * The symbols font's load at each size, per page: settled `true` once it
+ * arrived, `false` once it failed. Shared, so the panes waiting on one arrival
+ * see it in one batch. A failed load is not retried: the font is a bundled
+ * file, and a later arrival would rebuild an atlas the panes that saw the
+ * failure still draw from.
  */
-export async function loadSymbolsFont(fontSize: number): Promise<void> {
+const symbolsLoads = new WeakMap<FontFaceSet, Map<number, { arrived: boolean; load: Promise<boolean> }>>();
+
+/**
+ * Fetches the symbols font at a size, unless the page has it there already.
+ * Text drawn on a canvas, as xterm's WebGL renderer draws it, never starts the
+ * download of a `unicode-range` face, so the pane asks for it by name with a
+ * character of the range.
+ *
+ * Returns null when there is nothing to wait for: the font is there already,
+ * or the page has no FontFaceSet (jsdom). Otherwise the promise of the one
+ * load at that size every pane shares, `true` when the font arrives and
+ * `false` when it failed, which warns once in the console.
+ */
+export function symbolsFontArrival(fontSize: number): Promise<boolean> | null {
   const fonts: FontFaceSet | undefined = document.fonts;
-  if (!fonts) return;
-  await fonts.load(`${fontSize}px "${SYMBOLS_FONT}"`, SYMBOLS_SAMPLE);
+  if (!fonts) return null;
+  let bySize = symbolsLoads.get(fonts);
+  if (!bySize) symbolsLoads.set(fonts, (bySize = new Map()));
+  const known = bySize.get(fontSize);
+  if (known) return known.arrived ? null : known.load;
+  const font = `${fontSize}px "${SYMBOLS_FONT}"`;
+  if (fonts.check?.(font, SYMBOLS_SAMPLE)) {
+    bySize.set(fontSize, { arrived: true, load: Promise.resolve(true) });
+    return null;
+  }
+  const entry = { arrived: false, load: Promise.resolve(false) };
+  entry.load = fonts.load(font, SYMBOLS_SAMPLE).then(
+    () => {
+      entry.arrived = true;
+      return true;
+    },
+    (e: unknown) => {
+      console.warn("the terminal's symbols font did not load; Nerd Font icons draw blank", e);
+      return false;
+    },
+  );
+  bySize.set(fontSize, entry);
+  return entry.load;
 }
