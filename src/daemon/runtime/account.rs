@@ -1055,9 +1055,21 @@ impl AccountRuntime {
                 } else {
                     self.run_tick(kind, stop).await
                 };
+                // A stopped tick owes no backlog: the user asked the syncing
+                // to stop, and the scheduler's next tick comes at its
+                // interval (PERSO-321). The body is over, so the stop can no
+                // longer change.
+                if stopped.load(Ordering::SeqCst) {
+                    self.backlog.store(false, Ordering::SeqCst);
+                }
                 // Whatever asked for it: a manual sync, the watcher, a
                 // client's startup fetch or the scheduler all push the next
                 // scheduled tick back (#0134), and wake the judges (PERSO-186).
+                //
+                // The rule: whatever the scheduler reads once woken
+                // (`backlog_owed`, `completed_ticks`) is final before this
+                // call, since a scheduler on another thread may read it the
+                // instant `ticked` moves.
                 self.ran_a_body();
                 outcome
             }
@@ -1067,11 +1079,6 @@ impl AccountRuntime {
         // mutation asked for does not wait behind it.
         let mut outcome = outcome;
         outcome.stopped = stopped.load(Ordering::SeqCst);
-        if outcome.stopped {
-            // A stopped tick owes no backlog: the user asked the syncing to
-            // stop, and the scheduler's next tick comes at its interval.
-            self.backlog.store(false, Ordering::SeqCst);
-        }
         if !outcome.blocked {
             let polled = self.sync_calendar().await;
             outcome.calendar_changed = polled.changed();
