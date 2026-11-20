@@ -1355,7 +1355,7 @@ fn an_invitation_update_names_the_attendees_the_server_refused() {
         IMIP,
     ]);
     assert!(
-        out.contains("\u{2717} cy@example.com (To): permanent error (550): no such user"),
+        out.contains("\u{2717} cy@example.com (To): 550 no such user"),
         "{out}"
     );
 }
@@ -1384,14 +1384,14 @@ fn an_invitation_change_says_who_waits_in_the_outbox_and_who_was_refused() {
     ]);
     assert!(
         out.contains(
-            "\u{2717} cy@example.com (To): permanent error (550): no such user; refused for good, \
+            "\u{2717} cy@example.com (To): 550 no such user; refused for good, \
              so they will not get it"
         ),
         "{out}"
     );
     assert!(
         out.contains(
-            "\u{29d7} bob@example.com (To): transient error (451): 4.7.1 try again later; waits \
+            "\u{29d7} bob@example.com (To): 451 4.7.1 try again later; waits \
              in the outbox and goes out with a later sync"
         ),
         "{out}"
@@ -1413,7 +1413,7 @@ fn an_invitation_change_says_who_waits_in_the_outbox_and_who_was_refused() {
             "? bob@example.com (To): {}; parked in the outbox with no verdict, so they may \
              have it: check, then find its row with mp outbox list -A {IMIP}, then mp outbox retry \
              -A {IMIP} <id> or mp outbox discard -A {IMIP} <id>",
-            "response error: incomplete response"
+            "the connection closed before the server answered"
         )),
         "{out}"
     );

@@ -2755,7 +2755,7 @@ async fn an_update_nobody_received_cancels_nobody() {
         let error = status["error"]["message"].as_str().unwrap_or_default();
         assert!(
             error.contains("No attendee accepted")
-                && error.contains("ada@example.com (permanent error (550): no such user)"),
+                && error.contains("ada@example.com (550 no such user)"),
             "{status}"
         );
         assert_eq!(
@@ -2792,7 +2792,7 @@ async fn an_update_the_server_defers_still_cancels_the_attendee_it_drops() {
     assert_eq!(status["state"], "failed", "{status}");
     let error = status["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        error.contains("ada@example.com (transient error (451): 4.7.1 try again later)")
+        error.contains("ada@example.com (451 4.7.1 try again later)")
             && error.contains("waits in the outbox")
             && error.contains("told bob@example.com")
             && !error.contains("nothing else was sent"),
@@ -2888,9 +2888,9 @@ async fn an_update_deferred_for_one_and_refused_for_another_says_which_waits() {
     assert!(
         error.contains(
             "No attendee has the message yet: the server did not take it for ada@example.com \
-             (transient error (451): 4.7.1 try again later); it waits in the outbox"
+             (451 4.7.1 try again later); it waits in the outbox"
         ) && error.contains(
-            "the server refused it for good for cy@example.com (permanent error (550): no such user), who will \
+            "the server refused it for good for cy@example.com (550 no such user), who will \
              not get it"
         ) && error.contains("told bob@example.com"),
         "{status}"
@@ -2909,7 +2909,7 @@ fn queued_whole(status: &Value) -> &str {
         error.starts_with(
             "No attendee has the message yet: not sent, the message waits in the outbox: the \
              server rejected the SMTP password; set it with mp config set-password -A perso \
-             smtp: SMTP login failed: permanent error (535): 5.7.8 authentication failed; it \
+             smtp: SMTP login failed: 535 5.7.8 authentication failed; it \
              waits in the outbox and goes out on its own, so do not send the change again"
         ) && !error.contains("the server did not take it for"),
         "{status}"
@@ -2968,7 +2968,7 @@ async fn a_deferred_cancellation_of_a_dropped_attendee_waits_in_the_outbox() {
     assert!(
         error.contains(
             "the cancellation to the attendees it drops waits in the outbox for \
-             bob@example.com (transient error (451): 4.7.1 try again later)"
+             bob@example.com (451 4.7.1 try again later)"
         ) && !error.contains("was not taken"),
         "{status}"
     );
@@ -3236,7 +3236,7 @@ async fn an_update_names_the_attendees_the_server_refused() {
     assert_eq!(
         result["refused"],
         json!([{"address": "cy@example.com", "role": "To", "delivered": false,
-                "error": "permanent error (550): no such user"}]),
+                "error": "550 no such user"}]),
         "{result}"
     );
     assert_eq!(
@@ -3270,13 +3270,13 @@ async fn a_settled_update_names_who_waits_in_the_outbox_apart_from_who_was_refus
     assert_eq!(
         result["refused"],
         json!([{"address": "cy@example.com", "role": "To", "delivered": false,
-                "error": "permanent error (550): no such user"}]),
+                "error": "550 no such user"}]),
         "{result}"
     );
     assert_eq!(
         result["queued"],
         json!([{"address": "bob@example.com", "role": "To", "delivered": false,
-                "error": "transient error (451): 4.7.1 try again later"}]),
+                "error": "451 4.7.1 try again later"}]),
         "{result}"
     );
     assert!(result.get("parked").is_none(), "{result}");
@@ -3302,7 +3302,7 @@ async fn a_settled_update_names_who_is_parked_in_the_outbox() {
     assert_eq!(
         result["parked"],
         json!([{"address": "bob@example.com", "role": "To", "delivered": false,
-                "error": "response error: incomplete response"}]),
+                "error": "the connection closed before the server answered"}]),
         "{result}"
     );
     assert!(result.get("refused").is_none(), "{result}");
@@ -3327,7 +3327,7 @@ async fn a_settled_cancel_names_who_waits_in_the_outbox() {
     assert_eq!(
         result["queued"],
         json!([{"address": "bob@example.com", "role": "To", "delivered": false,
-                "error": "transient error (451): 4.7.1 try again later"}]),
+                "error": "451 4.7.1 try again later"}]),
         "{result}"
     );
     assert!(result.get("refused").is_none(), "{result}");

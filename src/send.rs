@@ -28,6 +28,7 @@ pub mod graph_submit;
 pub(crate) mod fake_smtp;
 #[cfg(test)]
 mod wire_tests;
+mod words;
 
 // The RFC 5322 address-string half of this module, which needs no transport and
 // which `draft` reads without wanting one, lives in `mp-core` since #0126
@@ -2571,7 +2572,11 @@ pub fn build_invite_mime_body(plain: &str, html: String, ics: &str) -> MultiPart
 /// so the test applies the policy a submission would.
 pub async fn test_smtp_connection(smtp_config: &SmtpConfig) -> Result<()> {
     let transport = build_smtp_transport(smtp_config)?;
-    if transport.test_connection().await? {
+    let reached = transport
+        .test_connection()
+        .await
+        .map_err(|e| anyhow!("{}", words::smtp_words(&e)))?;
+    if reached {
         Ok(())
     } else {
         Err(anyhow!(
@@ -5390,8 +5395,8 @@ fn is_login_refusal(err: &lettre::transport::smtp::Error) -> bool {
         return false;
     };
     u16::from(code) == 535
-        || err
-            .to_string()
+        || words::reply_text(err)
+            .unwrap_or_default()
             .split_whitespace()
             .any(|word| word == "5.7.8")
 }
@@ -5562,13 +5567,13 @@ async fn submit_through(
                     error: Some("not sent: the server refused the SMTP login".to_string()),
                     verdict: RecipientVerdict::Retryable,
                 });
-                login_refused = Some(e.to_string());
+                login_refused = Some(words::smtp_words(&e));
             }
             Err(e) => {
                 error!("Failed to send to {} ({}): {}", addr, role, e);
                 let (verdict, err_msg) = match unreached_reason(&e, server) {
                     Some(reason) => (RecipientVerdict::Unreached, reason),
-                    None => (smtp_failure_verdict(&e), e.to_string()),
+                    None => (smtp_failure_verdict(&e), words::smtp_words(&e)),
                 };
                 results.push(RecipientResult {
                     address: addr.clone(),

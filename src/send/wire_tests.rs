@@ -124,31 +124,31 @@ async fn each_refused_step_is_the_recipients_verdict_in_the_servers_words() {
             SmtpStep::Ehlo,
             "421 4.3.2 Service shutting down",
             RecipientVerdict::Retryable,
-            "transient error (421): 4.3.2 Service shutting down",
+            "421 4.3.2 Service shutting down",
         ),
         (
             SmtpStep::Mail,
             "451 4.3.0 Error: queue file write error",
             RecipientVerdict::Retryable,
-            "transient error (451): 4.3.0 Error: queue file write error",
+            "451 4.3.0 Error: queue file write error",
         ),
         (
             SmtpStep::Rcpt,
             "550 5.1.1 <ada@example.org>: Recipient address rejected: User unknown",
             RecipientVerdict::Rejected,
-            "permanent error (550): 5.1.1 <ada@example.org>: Recipient address rejected: User unknown",
+            "550 5.1.1 <ada@example.org>: Recipient address rejected: User unknown",
         ),
         (
             SmtpStep::Data,
             "554 5.5.1 Error: no valid recipients",
             RecipientVerdict::Rejected,
-            "permanent error (554): 5.5.1 Error: no valid recipients",
+            "554 5.5.1 Error: no valid recipients",
         ),
         (
             SmtpStep::Message,
             "452 4.3.1 Insufficient system storage",
             RecipientVerdict::Retryable,
-            "transient error (452): 4.3.1 Insufficient system storage",
+            "452 4.3.1 Insufficient system storage",
         ),
     ];
     for (step, reply, verdict, words) in cases {
@@ -176,10 +176,81 @@ async fn a_refusing_greeting_is_answered_before_any_login() {
     let result = verdict_of(&server, "greeting").await;
     assert_eq!(
         result.error.as_deref(),
-        Some("permanent error (554): 5.3.2 No SMTP service here")
+        Some("554 5.3.2 No SMTP service here")
     );
     assert!(!result.success);
     assert!(server.logins().is_empty(), "no password went out");
+}
+
+/// A reply over several lines (RFC 5321 4.2.1, `550-` then `550 `) reads as
+/// one sentence, its code once and the enhanced code it repeats once, and a
+/// reply with no text after its code still says what the code means; neither
+/// is lettre's `permanent error (550): ...`. (A code with not even the space
+/// after it is a reply lettre 0.11.19 cannot parse, read as no verdict;
+/// lettre 0.11.24 accepts it.)
+#[tokio::test]
+async fn a_multi_line_reply_reads_as_one_sentence_and_a_bare_code_still_says_something() {
+    let cases = [
+        (
+            "550-5.1.1 <ada@example.org>: Recipient address rejected:\r\n\
+             550 5.1.1 User unknown in virtual mailbox table",
+            RecipientVerdict::Rejected,
+            "550 5.1.1 <ada@example.org>: Recipient address rejected: User unknown in virtual \
+             mailbox table",
+        ),
+        (
+            "451-4.7.1 Greylisted, see\r\n451-4.7.1 https://example.org/greylisting\r\n\
+             451 4.7.1 try again in 5 minutes",
+            RecipientVerdict::Retryable,
+            "451 4.7.1 Greylisted, see https://example.org/greylisting try again in 5 minutes",
+        ),
+        (
+            "550 ",
+            RecipientVerdict::Rejected,
+            "550 (the server gave no reason; a permanent refusal)",
+        ),
+        (
+            "450 ",
+            RecipientVerdict::Retryable,
+            "450 (the server gave no reason; a temporary refusal)",
+        ),
+    ];
+    for (reply, verdict, words) in cases {
+        let server = RecordingSmtpServer::start();
+        server.answer(SmtpStep::Rcpt, Some(SmtpAnswer::reply(reply)));
+        let result = verdict_of(&server, &format!("lines-{}", server.port())).await;
+        assert_eq!(result.verdict, verdict, "{reply:?}: {result:?}");
+        assert_eq!(result.error.as_deref(), Some(words), "{reply:?}");
+    }
+}
+
+/// A refused login over several lines is still a refused login: the gate
+/// reads the code and the enhanced code `5.7.8` of the reply, never the
+/// words it is shown in (PERSO-296).
+#[tokio::test]
+async fn a_multi_line_login_refusal_is_a_refused_login_in_the_servers_words() {
+    let server = RecordingSmtpServer::start();
+    server.answer(
+        SmtpStep::Auth,
+        Some(SmtpAnswer::reply(
+            "535-5.7.8 Username and Password not accepted. For more information, go to\r\n\
+             535 5.7.8  https://support.example.org/mail/?p=BadCredentials",
+        )),
+    );
+    let refused = submit_to(
+        &built("lines-login", &["ada@example.org"]),
+        &config(&server, "lines-login"),
+    )
+    .await
+    .expect_err("a send no recipient took fails on the login");
+    let rejected = refused
+        .downcast_ref::<crate::login_gate::LoginRejected>()
+        .expect("the refusal is a refused login");
+    assert_eq!(
+        rejected.to_string(),
+        "SMTP login failed: 535 5.7.8 Username and Password not accepted. For more \
+         information, go to https://support.example.org/mail/?p=BadCredentials"
+    );
 }
 
 /// One recipient refused leaves the others delivered: each is its own
@@ -230,7 +301,7 @@ async fn a_refused_login_is_the_servers_answer_and_stops_the_send() {
         .expect("the refusal is a refused login");
     assert_eq!(
         rejected.to_string(),
-        "SMTP login failed: permanent error (535): 5.7.8 Error: authentication failed"
+        "SMTP login failed: 535 5.7.8 Error: authentication failed"
     );
     assert_eq!(server.logins().len(), 1, "one AUTH, not one per recipient");
     assert!(server.deliveries().is_empty());
@@ -248,7 +319,7 @@ async fn a_message_the_server_hung_up_on_has_no_verdict_and_was_received() {
     assert_eq!(result.verdict, RecipientVerdict::Unknown, "{result:?}");
     assert_eq!(
         result.error.as_deref(),
-        Some("response error: incomplete response")
+        Some("the connection closed before the server answered")
     );
     let deliveries = server.deliveries();
     assert_eq!(deliveries.len(), 1, "the server has the message");
@@ -330,7 +401,7 @@ async fn a_deferral_that_wears_off_is_retryable_then_delivered() {
     assert_eq!(first.verdict, RecipientVerdict::Retryable);
     assert_eq!(
         first.error.as_deref(),
-        Some("transient error (451): 4.7.1 <ada@example.org>: Recipient address rejected: try again later")
+        Some("451 4.7.1 <ada@example.org>: Recipient address rejected: try again later")
     );
     let second = verdict_of(&server, "deferred").await;
     assert_eq!(second.verdict, RecipientVerdict::Delivered, "{second:?}");

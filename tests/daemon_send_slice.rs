@@ -3669,6 +3669,128 @@ fn a_routed_send_approved_prints_each_draft_once_and_the_counts_after() {
     );
 }
 
+/// PERSO-336: a row an older build stored keeps the reasons in lettre's
+/// wording (`permanent error (550): ...`, `response error: incomplete
+/// response`), and it lists and classifies as it did: the reasons are shown
+/// as they were stored, and what the row is (partly delivered, parked, may
+/// already be delivered) comes from its state and its envelope, never from
+/// its words.
+#[tokio::test]
+async fn a_row_stored_in_lettres_old_wording_lists_and_classifies_as_before() {
+    use mailypoppins::outbox::{self, Envelope, RecipientVerdicts, SubmitOutcome};
+    use mailypoppins::send::RecipientRole;
+    const OLD_REFUSAL: &str =
+        "permanent error (550): 5.1.1 <carol@example.com>: Recipient address rejected: User unknown";
+    const OLD_NO_VERDICT: &str = "response error: incomplete response";
+
+    let mut slice = Slice::start();
+    slice.stop_daemon();
+    {
+        let store = fixture::store(slice.root(), fixture::ACCOUNT);
+        let blobs = fixture::blobs(slice.root(), fixture::ACCOUNT);
+        let envelope = Envelope {
+            from: "alpha@example.com".to_string(),
+            recipients: vec![
+                (fixture::TO.to_string(), RecipientRole::To),
+                (fixture::REJECTED.to_string(), RecipientRole::To),
+            ],
+            ..Default::default()
+        };
+        let raw = |mid: &str| {
+            format!(
+                "From: alpha@example.com\r\nTo: {}\r\nSubject: Old\r\nMessage-ID: {mid}\r\n\r\nBody.\r\n",
+                fixture::TO
+            )
+            .into_bytes()
+        };
+        let partial = "<old-partial@example.com>";
+        let id = outbox::enqueue(
+            &store,
+            &blobs,
+            fixture::ACCOUNT,
+            None,
+            partial,
+            &raw(partial),
+            &envelope,
+        )
+        .expect("enqueue the partly delivered row");
+        outbox::record_submission(
+            &store,
+            &blobs,
+            id,
+            &SubmitOutcome::PerRecipient(RecipientVerdicts {
+                delivered: vec![fixture::TO.to_string()],
+                rejected: vec![(fixture::REJECTED.to_string(), OLD_REFUSAL.to_string())],
+                ..Default::default()
+            }),
+        )
+        .expect("record the partial delivery");
+        let parked = "<old-parked@example.com>";
+        let id = outbox::enqueue(
+            &store,
+            &blobs,
+            fixture::ACCOUNT,
+            Some(fixture::SENT_MAILBOX),
+            parked,
+            &raw(parked),
+            &envelope,
+        )
+        .expect("enqueue the parked row");
+        outbox::mark_submission_started(&store, id).expect("mark the parked row");
+        outbox::record_submission(
+            &store,
+            &blobs,
+            id,
+            &SubmitOutcome::Ambiguous(OLD_NO_VERDICT.to_string()),
+        )
+        .expect("park the row");
+    }
+    slice.start_daemon();
+
+    let mut conn = slice.connect().await;
+    let listing: OutboxListing = serde_json::from_value(
+        call(
+            &mut conn,
+            "send.outbox_list",
+            json!({"account": fixture::ACCOUNT}),
+        )
+        .await,
+    )
+    .expect("an OutboxListing");
+    let row = |mid: &str| {
+        listing
+            .rows
+            .iter()
+            .find(|row| row.message_id == mid)
+            .unwrap_or_else(|| panic!("{mid} is listed: {listing:?}"))
+            .clone()
+    };
+    let partial = row("<old-partial@example.com>");
+    assert_eq!(partial.state, "done", "{partial:?}");
+    assert!(partial.partial, "{partial:?}");
+    assert_eq!(
+        partial.rejected,
+        vec![(fixture::REJECTED.to_string(), OLD_REFUSAL.to_string())]
+    );
+    let parked = row("<old-parked@example.com>");
+    assert_eq!(parked.state, "failed", "{parked:?}");
+    assert!(parked.may_be_delivered, "{parked:?}");
+    assert_eq!(
+        parked.last_error.as_deref(),
+        Some(OLD_NO_VERDICT),
+        "{parked:?}"
+    );
+
+    let text = stdout(&slice.routed(&["outbox", "list"]));
+    assert!(
+        text.contains(&format!(
+            "\n        never delivered to: {} ({OLD_REFUSAL})\n",
+            fixture::REJECTED
+        )) && text.contains(&format!("\n        last error: {OLD_NO_VERDICT}\n")),
+        "{text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 12. Over the wire (PERSO-210)
 // ---------------------------------------------------------------------------
@@ -3804,9 +3926,18 @@ mod wire {
         let listing = wire.mp(&["outbox", "list"]);
         let text = stdout(&listing);
         assert!(
-            text.contains("never delivered to: bob@example.org")
-                && text
-                    .contains("5.1.1 <bob@example.org>: Recipient address rejected: User unknown"),
+            stdout(&out).contains(
+                "\n  ✗ bob@example.org (To): 550 5.1.1 <bob@example.org>: Recipient address \
+                 rejected: User unknown\n"
+            ),
+            "the send names the refusal as the server wrote it, code first:\n{}",
+            stdout(&out)
+        );
+        assert!(
+            text.contains(
+                "\n        never delivered to: bob@example.org (550 5.1.1 <bob@example.org>: \
+                 Recipient address rejected: User unknown)\n"
+            ),
             "the operator is told who never got it, and why:\n{text}"
         );
         let delivered: Vec<String> = wire
@@ -3840,8 +3971,9 @@ mod wire {
         let out = wire.mp(&["send", &selector, "-y"]);
         assert_eq!(out.status.code(), Some(1));
         assert!(
-            stdout(&out)
-                .contains("  ✗ ada@example.org (To): response error: incomplete response\n"),
+            stdout(&out).contains(
+                "  ✗ ada@example.org (To): the connection closed before the server answered\n"
+            ),
             "{}",
             stdout(&out)
         );
@@ -3853,7 +3985,7 @@ mod wire {
         assert!(
             listing.contains(" failed ")
                 && listing.contains(
-                    "last error: no verdict for ada@example.org: response error: incomplete response"
+                    "last error: no verdict for ada@example.org: the connection closed before the server answered"
                 ),
             "{listing}"
         );
