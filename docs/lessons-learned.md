@@ -3936,3 +3936,9 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 - Every answer that names one stored row takes its selector from `selector::of_row` (a listing from `Selector::for_listed` over its twins); the bare `Selector::for_message` names every copy of a Message-ID in its mailbox, and `tests/architecture_boundaries.rs` fails on any call of it outside `FOR_MESSAGE_SITES`, where each kept site (the selector module, a fallback after a failed twins probe, a test oracle over rows with no twin) carries its reason.
 - A test that needs two copies of one Message-ID in one mailbox cannot ingest it twice, since ingest rebinds the second UID onto the first row: use `ingest::ingest_twin` in unit tests or `read_fixture::ingest_copy_of` in integration tests.
 - Where the selector feeds a log line or a best-effort field (hook payload, sent copy, calendar view, restore), a failed twins probe falls back to the bare selector with a warning; where it is an RPC answer, the probe's error is the answer.
+
+## A test's closed port has to stay bound (2026-11-20, PERSO-342)
+
+- A test that needs a localhost port nothing listens on holds a `ClosedPort` (`tests/support/closed_port.rs`): a socket bound without `listen()` and without `SO_REUSEADDR` is refused at once and never handed to another bind of port 0, whereas a port bound and dropped goes to the next fake that binds port 0, which then answers the connect.
+- A flaky "refused" test that fails with the send delivered, and a neighbour fake counting one message too many, is this race and has nothing to do with timing; the log of the failing run names both tests.
+- A deadline test pauses tokio's clock only once the fake has fallen silent (greeting, AUTH or message recorded), so no bytes are in flight when time stops; the idle runtime then jumps to the earliest timer, and a hang guard started before the pause still fails the test.
