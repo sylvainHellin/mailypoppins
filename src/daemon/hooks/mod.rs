@@ -756,6 +756,19 @@ mod tests {
         assert_eq!(cursor.owed, vec![3], "uid 3 is still owed, and only it");
         assert!(cursor.considered.is_empty());
 
+        // A store that cannot say what was given up on fails the scan and
+        // leaves the owed set as it was, rather than reading as "none".
+        fx.store
+            .conn()
+            .execute_batch("ALTER TABLE ingest_failures RENAME TO ingest_failures_away;")
+            .unwrap();
+        assert!(scan(&fx.store, &fx.blobs, &fx.account, &fx.state).is_err());
+        assert_eq!(state::load(&fx.state).unwrap().hooks["pi"].owed, vec![3]);
+        fx.store
+            .conn()
+            .execute_batch("ALTER TABLE ingest_failures_away RENAME TO ingest_failures;")
+            .unwrap();
+
         // The sync stops giving up on it without writing it (a rebind
         // cleared its count): nothing is owed any more.
         ingest::clear_ingest_failure(&fx.store, ACCOUNT, "inbox", 3);

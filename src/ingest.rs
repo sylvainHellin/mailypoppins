@@ -3160,10 +3160,6 @@ mod tests {
         assert_eq!(id.len(), "<sha256-".len() + 16 + "@local.invalid>".len());
     }
 
-    /// A row an older build stored with its `From` decoded, where a decoded
-    /// `(` hides the mailbox, is stored again from its raw message, newest
-    /// first and once; a row whose raw was evicted keeps what it holds, and a
-    /// header with no encoded-word is never written again.
     /// PERSO-333 review: a failure counts towards the give-up only once
     /// [`FAILURE_SPACING_SECS`] has passed since the last one that counted,
     /// so a burst of passes (an IDLE tick per arrival) cannot use the budget
@@ -3224,6 +3220,10 @@ mod tests {
         );
     }
 
+    /// A row an older build stored with its `From` decoded, where a decoded
+    /// `(` hides the mailbox, is stored again from its raw message, newest
+    /// first and once; a row whose raw was evicted keeps what it holds, and a
+    /// header with no encoded-word is never written again.
     #[test]
     fn the_address_backfill_stores_an_old_rows_addresses_again_once() {
         use crate::store::schema::{clear_meta, get_meta, META_ADDRESSES_REWRITTEN_BELOW};

@@ -2039,9 +2039,9 @@ mod tests {
         assert_eq!(new_uids_in_window(&[10, 11], &HashSet::new()), vec![10, 11]);
     }
 
-    /// A server that withholds `UIDNEXT` leaves the highest UID it did list,
-    /// and one that lists neither leaves 0, which prunes nothing and makes
-    /// every listed UID a placeholder rather than a prune candidate.
+    /// PERSO-333 review: the line a pass logs for the messages it does not
+    /// ask for names the first few UIDs, each with its retry, and counts the
+    /// rest.
     #[test]
     fn the_skip_line_names_the_first_uids_given_up_on_and_when_each_is_retried() {
         let at = |uid: u32| (uid, 1_800_000_000 + i64::from(uid) * 60);
@@ -2066,6 +2066,9 @@ mod tests {
         );
     }
 
+    /// A server that withholds `UIDNEXT` leaves the highest UID it did list,
+    /// and one that lists neither leaves 0, which prunes nothing and makes
+    /// every listed UID a placeholder rather than a prune candidate.
     #[test]
     fn the_ceiling_falls_back_to_the_listing_then_to_zero() {
         assert_eq!(ceiling(None, &[1, 2, 9]), 9);
