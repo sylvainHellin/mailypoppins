@@ -387,6 +387,33 @@ fn a_daemon_backed_mailbox_load_matches_the_store_backed_one() {
     assert_eq!(archive.len(), 1);
 }
 
+/// A mailbox holding two copies of one Message-ID lists each by its own
+/// selector, UID included (PERSO-244), and the store-backed oracle names them
+/// the same way, so the equality above holds over twins too (PERSO-340).
+#[test]
+fn a_mailbox_with_twins_loads_the_same_through_the_daemon_and_the_store() {
+    let fixture = Fixture::new();
+    seed_inbox();
+    let store = crate::store::Store::open(crate::config::store_path(ACCOUNT)).unwrap();
+    let blobs = crate::store::BlobStore::for_account(ACCOUNT);
+    let twin = fixture_email("a", "Mon, 01 Jan 2024 09:00:00 +0000", false);
+    crate::ingest::ingest_twin(
+        &store,
+        &blobs,
+        &crate::ingest::IngestInput {
+            account: ACCOUNT,
+            mailbox: "inbox",
+            uid: 4,
+            email: &twin,
+            raw: None,
+        },
+    );
+
+    let daemon = list_emails(&fixture, ACCOUNT, "inbox").expect("the daemon lists inbox");
+    assert_eq!(daemon.len(), 4);
+    same_entries(&daemon, &load_emails(ACCOUNT, "inbox"), "inbox with twins");
+}
+
 /// Newest first, which is the order the list renders and the order every
 /// cursor key assumes. Pinned separately from the equality above so a query
 /// layer that happened to match a *wrongly* ordered incumbent still fails.
