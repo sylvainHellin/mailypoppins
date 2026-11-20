@@ -70,8 +70,11 @@ pub(super) fn load_emails(account: &str, mailbox: &str) -> Vec<EmailEntry> {
     span.mark(&format!("{} row(s), no blob reads", rows.len()));
 
     let status = status_for_mailbox(mailbox);
+    // The whole mailbox, so its rows name its twins, as `message.list` with no
+    // limit names them.
+    let twins = crate::selector::Twins::among(rows.iter());
     rows.iter()
-        .map(|row| entry_from_row(row_to_wire(account, row), &status))
+        .map(|row| entry_from_row(row_to_wire(account, row, &twins), &status))
         .collect()
 }
 
@@ -159,8 +162,13 @@ pub(super) fn load_drafts(account: &str) -> Vec<EmailEntry> {
 /// The oracle's half of the listing equality, the same construction
 /// `src/daemon/methods/message.rs`'s `to_json` performs over the same row.
 /// `mailbox` is not a field of the wire row: a listing answer names the
-/// mailbox once, and the selector the daemon rendered carries it.
-fn row_to_wire(account: &str, row: &crate::store::read::MessageRow) -> MessageListRow {
+/// mailbox once, and the selector the daemon rendered carries it, with the
+/// row's UID when `twins` holds its Message-ID in its mailbox (PERSO-244).
+fn row_to_wire(
+    account: &str,
+    row: &crate::store::read::MessageRow,
+    twins: &crate::selector::Twins,
+) -> MessageListRow {
     let (_display, date_sort) = resolve_date(&row.date_display, &None, Path::new(""));
     let flags = row.flags();
     MessageListRow {
@@ -183,7 +191,7 @@ fn row_to_wire(account: &str, row: &crate::store::read::MessageRow) -> MessageLi
         },
         has_attachments: row.has_attachments,
         is_invite: row.is_invite,
-        selector: crate::selector::Selector::for_message(account, row).to_string(),
+        selector: crate::selector::Selector::for_listed(account, row, twins).to_string(),
         note: None,
     }
 }

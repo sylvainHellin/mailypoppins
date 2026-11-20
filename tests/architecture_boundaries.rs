@@ -1249,7 +1249,7 @@ const FOR_MESSAGE_ROOTS: [&str; 4] = ["src", "crates", "clients", "tests"];
 /// a test's input or oracle over rows that have no twin. A new call belongs on
 /// `of_row`, or here with its reason; a call that went away is struck in the
 /// same commit.
-const FOR_MESSAGE_SITES: [(&str, &str, &str); 17] = [
+const FOR_MESSAGE_SITES: [(&str, &str, &str); 16] = [
     (
         "crates/mp-core/src/selector.rs",
         "for_listed",
@@ -1303,12 +1303,6 @@ const FOR_MESSAGE_SITES: [(&str, &str, &str); 17] = [
         "resolve_received",
         "the selector module itself: the ambiguity refusal's candidates, to which ambiguous() \
          appends each twin's UID",
-    ),
-    (
-        "src/tui_tests/oracle.rs",
-        "row_to_wire",
-        "test oracle of message.list's row over the fixture mailboxes, none of which holds a \
-         twin",
     ),
     (
         "tests/daemon_read_only_methods.rs",
