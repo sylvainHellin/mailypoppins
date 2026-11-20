@@ -3526,7 +3526,7 @@ mod tests {
     }
 
     #[test]
-    fn an_editor_save_publishes_draft_changed_and_bumps_the_row() {
+    fn an_editor_save_publishes_draft_changed_and_leaves_the_row_in_place() {
         let (d, f, rx) = fixture_with_events();
         let offsite = draft_path_on(&d, "work", "offsite-note").expect("path");
         let launch = open_in_editor(&f, &offsite.path);
@@ -3551,9 +3551,15 @@ mod tests {
         );
         let text = std::fs::read_to_string(&offsite.path).expect("file");
         assert!(text.trim_end().ends_with(crate::fixture::EDITOR_SAVE_LINE));
+        // Drafts list newest created first, so an edit never moves one.
         match list_messages_on(&d, "work", "drafts").expect("drafts") {
             MessageList::Drafts { listing, .. } => {
-                assert_eq!(listing.drafts[0].id, "offsite-note", "the save bumped it")
+                let ids: Vec<&str> = listing.drafts.iter().map(|r| r.id.as_str()).collect();
+                assert_eq!(
+                    ids,
+                    ["angebot-antwort", "offsite-note"],
+                    "the save left it where its creation time puts it"
+                )
             }
             other => panic!("expected drafts, got {other:?}"),
         }
