@@ -898,14 +898,19 @@ function syncEnded(s: AppState, end: OperationEnd): AppState {
   const syncs = { ...s.syncs };
   delete syncs[end.operation_id];
   const next = { ...s, syncs };
+  // A sync that did not finish after the daemon announced its stop, cancelled,
+  // failed or dropped with the connection (the Rust layer drops it before the
+  // next daemon's snapshot clears the flag), was cut short by that stop, as
+  // `mp sync` and the TUI say.
+  if (s.shuttingDown && ("dropped" in end || end.state === "cancelled" || end.state === "failed")) {
+    return pushNotice(next, { kind: "operation_cancelled", account: run.account, text: syncCutByShutdownText(run.account) });
+  }
   if ("dropped" in end) {
     return pushNotice(next, { kind: "sync_failed", account: run.account, text: `Sync of ${run.account} was dropped: ${end.dropped}` });
   }
   // A cancel is no failure of the sync: it ends on what stays (PERSO-321).
-  // One that came after the daemon announced its stop was that stop's.
   if (end.state === "cancelled") {
-    const text = s.shuttingDown ? syncCutByShutdownText(run.account) : syncCancelledText(run.account);
-    return pushNotice(next, { kind: "operation_cancelled", account: run.account, text });
+    return pushNotice(next, { kind: "operation_cancelled", account: run.account, text: syncCancelledText(run.account) });
   }
   if (end.state === "failed") {
     const why = end.error ?? end.state;
