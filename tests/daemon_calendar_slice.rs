@@ -3913,3 +3913,56 @@ async fn two_updates_at_once_send_one() {
         "{filed}"
     );
 }
+
+/// A daemon that goes away while `mp event respond` waits may have sent the
+/// answer already: the server took it before the daemon could say so, and a
+/// second run would mail the organizer a second answer. So the command does
+/// not say to run it again; it says the answer may have gone out and how to
+/// check before answering again.
+///
+/// The commit-hold hook holds the answer at its commit point, and the
+/// daemon is killed there.
+#[test]
+fn an_answer_cut_off_by_the_daemon_going_away_says_how_to_check_it() {
+    let markers = tempfile::tempdir().unwrap();
+    let hold = send_fixture::commit_hold_dir(markers.path());
+    let mut slice = Slice::start_with(
+        false,
+        &[(
+            mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV,
+            hold.to_string_lossy().into_owned(),
+        )],
+    );
+    let respond = support::parity::mp_command(slice.root())
+        .env(support::parity::REQUIRE_ENV, "1")
+        .args(["event", "respond", "ev-meeting", "accept", "-A", SERVER])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mp event respond");
+    let start = Instant::now();
+    while !hold.join("event.respond.held").exists() {
+        assert!(start.elapsed() < DEADLINE, "the answer was never held");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    slice.daemon.take().expect("the daemon runs").stop();
+    let out = respond
+        .wait_with_output()
+        .expect("mp event respond's output");
+
+    assert_eq!(out.status.code(), Some(4), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the mailypoppins daemon went away while this command ran"),
+        "{err}"
+    );
+    assert!(!err.contains("run the command again"), "{err}");
+    assert!(
+        err.contains(&format!(
+            "next:       the answer may already have reached the organizer: run `mp sync -A \
+             {SERVER}`, then check your answer with `mp event show ev-meeting -A {SERVER}` \
+             before answering again"
+        )),
+        "{err}"
+    );
+}
