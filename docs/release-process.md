@@ -379,8 +379,12 @@ reinstalled **at a different path** leaves a service pointing at the old one.
 The repair is `mp daemon install-service --force`, which rewrites the file and
 re-enables it.
 
-Installing from source keeps `~/.cargo/bin/mp` and never moves, so nothing has
-to be done there. A Homebrew upgrade moves the real binary into a new
+Installing from source keeps `~/.cargo/bin/mp` and never moves, but a new
+version may ship a different unit (a `Documentation=` link, a stop timeout), and
+an install never replaces a file that differs from its own without `--force`,
+since a user may have edited it. `mp daemon install-service --check` reports
+such a file under a warning sign; `mp daemon install-service --force` replaces
+it and restarts the service's daemon on the new file. A Homebrew upgrade moves the real binary into a new
 version-stamped Cellar directory while `bin/mp` stays a symlink at a stable
 path.
 The service bakes `std::env::current_exe()` without canonicalising it, and when the first `mp` on `PATH` is the same file (same device and inode), it bakes that `PATH` entry instead, so a Homebrew install gets the stable `bin/mp` even when the OS reports the Cellar path.

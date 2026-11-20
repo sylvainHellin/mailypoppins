@@ -115,6 +115,8 @@
 //! ✓ no service installed             # uninstall with nothing there: a no-op
 //!
 //! ✓ service installed at <path>      # --check, exit 0
+//! ⚠ service installed at <path>, but it is not the one this version installs
+//!   replace it: mp daemon install-service --force   # --check, a differing file, exit 0
 //! ✗ no service installed             # --check, exit 1
 //!   install one: mp daemon install-service
 //! ```

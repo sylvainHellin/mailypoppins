@@ -903,6 +903,7 @@ What the commands print, and what they exit:
 | uninstall | `✓ removed <path>` | 0 |
 | uninstall with nothing installed | `✓ no service installed`, and nothing is run | 0 |
 | `--check`, installed | `✓ service installed at <path>` | 0 |
+| `--check`, installed but not the file this version writes | `⚠ service installed at <path>, but it is not the one this version installs`, then `  replace it: mp daemon install-service --force` | 0 |
 | `--check`, absent | `✗ no service installed` | 1 |
 | any of them on a profile | `✗ the login service is the default profile's; …` on stderr, nothing written or run | 1 |
 

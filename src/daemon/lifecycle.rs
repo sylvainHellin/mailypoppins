@@ -241,7 +241,8 @@ pub enum DaemonAction {
         /// Replace a service file whose content differs from this version's
         #[arg(long)]
         force: bool,
-        /// Report whether a service is installed, and write nothing
+        /// Report whether a service is installed and is the file this version
+        /// writes, and write nothing
         #[arg(long)]
         check: bool,
     },

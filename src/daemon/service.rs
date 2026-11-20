@@ -194,11 +194,11 @@ pub async fn install(force: bool, check: bool) -> Result<i32> {
     let target = resolve_target(std::env::var(OS_ENV).ok().as_deref())?;
     let path = service_path(target);
 
+    let desired = render(target)?;
     if check {
-        return Ok(report_check(&path));
+        return Ok(report_check(&path, &desired));
     }
 
-    let desired = render(target)?;
     let existing = fs::read_to_string(&path).ok();
     let (header, written) = match existing {
         Some(current) if current == desired => (
@@ -292,10 +292,23 @@ async fn hand_over(
 ///
 /// The `✗` goes to stdout rather than to stderr, because this is a report the
 /// command was asked for and not a failure of it; the exit code is what a
-/// script branches on.
-fn report_check(path: &Path) -> i32 {
+/// script branches on. A file that is not `desired`, the one this version
+/// installs (an older version's, or one edited by hand), is reported under a
+/// warning sign with the command that replaces it: an install refuses that
+/// file without `--force`, so nothing else would ever show that the service
+/// runs a definition this version no longer writes.
+fn report_check(path: &Path, desired: &str) -> i32 {
     if path.exists() {
-        println!("{} service installed at {}", tick(), path.display());
+        if fs::read_to_string(path).is_ok_and(|current| current == desired) {
+            println!("{} service installed at {}", tick(), path.display());
+        } else {
+            println!(
+                "{} service installed at {}, but it is not the one this version installs",
+                "\u{26a0}".yellow(),
+                path.display()
+            );
+            println!("  replace it: mp daemon install-service --force");
+        }
         return EXIT_OK;
     }
     println!("{} no service installed", cross());
