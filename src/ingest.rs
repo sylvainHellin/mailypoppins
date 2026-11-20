@@ -1904,7 +1904,9 @@ pub fn given_up_report(
     now: i64,
 ) -> Vec<mp_protocol::events::GivenUpMessage> {
     use mp_protocol::events::{GivenUpKind, GivenUpMessage};
-    let read = || -> rusqlite::Result<Vec<(String, i64, Option<String>, Option<i64>)>> {
+    /// `(mailbox, uid, last_error, updated)` of one `ingest_failures` row.
+    type Row = (String, i64, Option<String>, Option<i64>);
+    let read = || -> rusqlite::Result<Vec<Row>> {
         let mut stmt = store.conn().prepare(
             "SELECT f.mailbox, f.uid, f.last_error, f.updated FROM ingest_failures f
              WHERE f.account = ?1 AND f.attempts >= ?2
