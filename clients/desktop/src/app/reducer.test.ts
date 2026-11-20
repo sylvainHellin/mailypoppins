@@ -776,6 +776,16 @@ describe("mutations and pending state", () => {
       expect(s.activityLog.slice(-2).map((e) => e.text)).toEqual(["Fetch failed (home): login refused", "Sync of work failed: timeout"]);
     });
 
+    it("says a sync that joined a sync already running took that sync's smaller bound", () => {
+      let s = run(booted(), { type: "sync_requested" }, { type: "sync_started", operation_id: "op-1", account: "work", mode: "full" });
+      s = run(s, envelope("operation.finished", { operation_id: "op-1", state: "succeeded", result: { blocked: false, outcome: null, joined: { limit: 100 } } }));
+      expect(s.syncs).toEqual({});
+      expect(last(s)).toMatchObject({
+        kind: "sync_joined",
+        text: "Joined the sync of work already running, which takes only the newest 100 messages per mailbox, fewer than this sync asked for; sync again once it is over for the rest",
+      });
+    });
+
     it("settles quietly on success and reports a dropped sync", () => {
       let s = run(booted(), { type: "sync_requested" }, { type: "sync_started", operation_id: "op-1", account: "work", mode: "full" });
       s = run(s, envelope("operation.finished", { operation_id: "op-1", state: "succeeded", result: {} }));

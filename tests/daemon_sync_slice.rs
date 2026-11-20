@@ -2127,11 +2127,13 @@ mod wire {
         );
     }
 
-    /// `mp sync -n 2` that arrives while a tick with the usual bound runs
-    /// joins that tick rather than running a second pass beside it, and says
-    /// in one line that its bound did not apply.
+    /// A bounded `mp sync` that arrives while a tick with the usual bound
+    /// runs joins that tick rather than running a second pass beside it.
+    /// `-n 150` asked for more than the running tick takes, so it says in one
+    /// line that the smaller bound applied; `-n 2` got more than it asked
+    /// for, which needs no line.
     #[test]
-    fn a_bounded_sync_joins_a_tick_already_running_and_says_so() {
+    fn a_bounded_sync_joins_a_tick_already_running_and_says_when_it_got_less() {
         use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 
         let mut wire = WireRoot::new();
@@ -2140,37 +2142,43 @@ mod wire {
         let hold_env = hold.to_string_lossy().into_owned();
         wire.start(&[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
 
-        let running = mp_command(wire.root())
-            .env(REQUIRE_ENV, "1")
-            .arg("sync")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn mp sync");
+        let sync = |args: &[&str]| {
+            mp_command(wire.root())
+                .env(REQUIRE_ENV, "1")
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|e| panic!("spawn mp {}: {e}", args.join(" ")))
+        };
+        let running = sync(&["sync"]);
         wait_for("the tick to be held at its second mailbox", || {
             hold.join("sync.quick.held").exists()
         });
-        let bounded = mp_command(wire.root())
-            .env(REQUIRE_ENV, "1")
-            .args(["sync", "-n", "2"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn mp sync -n 2");
-        // Long enough for the bounded pass to reach the tick and join it.
+        let more = sync(&["sync", "-n", "150"]);
+        let fewer = sync(&["sync", "-n", "2"]);
+        // Long enough for both bounded passes to reach the tick and join it.
         std::thread::sleep(std::time::Duration::from_millis(500));
         super::support::send_fixture::release_commit_hold(&hold, "sync.quick");
 
         let running = running.wait_with_output().expect("mp sync's output");
         assert_ok(&running, "mp sync");
-        let bounded = bounded.wait_with_output().expect("mp sync -n 2's output");
-        assert_ok(&bounded, "mp sync -n 2");
+        let more = more.wait_with_output().expect("mp sync -n 150's output");
+        assert_ok(&more, "mp sync -n 150");
         assert_eq!(
-            stdout(&bounded),
+            stdout(&more),
             format!(
-                "ℹ Joined the sync of {ACCOUNT} already running, which takes the newest 100 \
-                 messages per mailbox instead of the bound this sync asked for\n"
+                "ℹ Joined the sync of {ACCOUNT} already running, which takes only the \
+                 newest 100 messages per mailbox, fewer than this sync asked for; sync again \
+                 once it is over for the rest\n"
             )
+        );
+        let fewer = fewer.wait_with_output().expect("mp sync -n 2's output");
+        assert_ok(&fewer, "mp sync -n 2");
+        assert_eq!(
+            stdout(&fewer),
+            "",
+            "a pass that got more than it asked says nothing"
         );
         assert_eq!(
             wire.local("inbox").len(),

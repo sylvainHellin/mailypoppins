@@ -2266,9 +2266,22 @@ mod tests {
 
     use super::{
         attachment_files, changed_line, draft_from_message, draft_from_source, eml_file,
-        local_search, markdown_rendition, MessageAddress,
+        local_search, markdown_rendition, sync_status_line, MessageAddress,
     };
     use crate::queries::Queries;
+
+    /// A pass that joined a sync already running with a smaller bound (`sS`
+    /// beside the scheduler's quick tick) settles with no outcome of its own
+    /// and `joined`, and the status line says the running sync's bound
+    /// applied, as `mp sync` does, instead of staying empty.
+    #[test]
+    fn a_pass_that_joined_a_smaller_sync_says_so() {
+        let settled = json!({"blocked": false, "outcome": null, "joined": {"limit": 100}});
+        assert_eq!(
+            sync_status_line("work", &settled),
+            "Joined the sync of work already running, which takes only the newest 100 messages per mailbox, fewer than this sync asked for; sync again once it is over for the rest"
+        );
+    }
 
     /// A door that records every call and answers each with `answer`.
     struct Recorder {
