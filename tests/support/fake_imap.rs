@@ -40,7 +40,8 @@
 //! off ([`RejectingImapServer::set_uidplus`]), and a test reads what a
 //! folder holds back ([`RejectingImapServer::contents`]). A test can slow
 //! every body download down ([`RejectingImapServer::set_body_delay`]) and
-//! count them ([`RejectingImapServer::body_fetches`]).
+//! count them ([`RejectingImapServer::body_fetches`]), and read back every
+//! `SEARCH` it ran ([`RejectingImapServer::searches`]).
 //!
 //! A test can make the next APPENDs file their message and hang up before
 //! the answer ([`RejectingImapServer::hang_up_after_appends`]), or answer
@@ -266,6 +267,8 @@ struct Shared {
     /// The verbs whose command closes the connection, after an untagged
     /// line and before the tagged answer.
     hangups: Mutex<std::collections::HashSet<String>>,
+    /// The folder and the command line of every `SEARCH` the server ran.
+    searches: Mutex<Vec<(String, String)>>,
 }
 
 impl Shared {
@@ -338,6 +341,7 @@ impl RejectingImapServer {
             fetch_refusals: Mutex::new(HashMap::new()),
             chunk_refusal: Mutex::new(None),
             hangups: Mutex::new(std::collections::HashSet::new()),
+            searches: Mutex::new(Vec::new()),
         });
         let served = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -608,6 +612,17 @@ impl RejectingImapServer {
     /// How many `BODY.PEEK[]` fetches the server has answered so far.
     pub fn body_fetches(&self) -> usize {
         self.shared.body_fetches.load(Ordering::SeqCst)
+    }
+
+    /// The folder and the command line of every `SEARCH` the server ran so
+    /// far, in order, a refused one left out: what a test reads to prove a
+    /// client looked before it acted (the outbox's dedup search, #0116).
+    pub fn searches(&self) -> Vec<(String, String)> {
+        self.shared
+            .searches
+            .lock()
+            .expect("the search list")
+            .clone()
     }
 
     /// Cut every open connection, the way a server drops the sessions of an
@@ -1146,6 +1161,13 @@ async fn serve(
                         async_std::task::sleep(std::time::Duration::from_millis(delay)).await;
                     }
                     shared.body_fetches.fetch_add(1, Ordering::SeqCst);
+                }
+                if command == "SEARCH" {
+                    shared
+                        .searches
+                        .lock()
+                        .expect("the search list")
+                        .push((name.clone(), line.clone()));
                 }
                 on_selected(
                     &shared,

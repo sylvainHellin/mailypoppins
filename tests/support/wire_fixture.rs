@@ -210,6 +210,203 @@ impl Default for WireRoot {
     }
 }
 
+/// The two fake servers, for an account of another fixture to be moved
+/// onto (PERSO-331): the send, admin and calendar fixtures seed accounts
+/// that configure no server, and a test that needs a send to go out points
+/// one of them at these with [`WireServers::wire`] before its daemon starts.
+///
+/// The IMAP server holds the five folders [`WireRoot`]'s does, empty. An
+/// account wired here keeps its own store, drafts and outbox, so a test
+/// asserts on what its fixture seeded; only the transport is the wire's.
+pub struct WireServers {
+    pub smtp: RecordingSmtpServer,
+    pub imap: RejectingImapServer,
+}
+
+impl WireServers {
+    /// Start both servers, the IMAP one with empty folders.
+    pub fn start() -> WireServers {
+        let smtp = RecordingSmtpServer::start();
+        let imap = RejectingImapServer::start_with(LoginPolicy::Accept);
+        imap.set_folders(Vec::new());
+        for (folder, uidvalidity) in [
+            (INBOX, 11),
+            (SENT, 12),
+            (DRAFTS, 13),
+            (ARCHIVE, 14),
+            (TRASH, 15),
+        ] {
+            imap.set_mail(folder, uidvalidity, Vec::new());
+        }
+        WireServers { smtp, imap }
+    }
+
+    /// Point `account` of `<root>/config.toml` at both servers and store
+    /// its two passwords in the sandbox's `secrets.enc`; before the daemon
+    /// starts, since it reads both once.
+    ///
+    /// The account submits to the SMTP server and files its Sent copies in
+    /// the IMAP server's [`SENT`] folder, as its default sender. Its
+    /// scheduled sync is off and so is its drafts mirror: an account of
+    /// these fixtures had no server before, so neither ever ran on it, and
+    /// the only server traffic is the send's own (the submission, the
+    /// APPEND and its dedup search).
+    pub fn wire(&self, root: &Path, account: &str) {
+        self.rewrite(root, account, true);
+    }
+
+    /// [`WireServers::wire`] with the SMTP server alone: the account sends
+    /// and has no IMAP server to file a copy in or to claim a draft from.
+    pub fn wire_smtp_only(&self, root: &Path, account: &str) {
+        self.rewrite(root, account, false);
+    }
+
+    fn rewrite(&self, root: &Path, account: &str, with_imap: bool) {
+        let path = root.join("config.toml");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let mut config: toml::Table = text
+            .parse()
+            .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+        let accounts = config
+            .get_mut("accounts")
+            .and_then(toml::Value::as_array_mut)
+            .expect("the configuration has accounts");
+        let entry = accounts
+            .iter_mut()
+            .filter_map(toml::Value::as_table_mut)
+            .find(|table| table.get("name").and_then(toml::Value::as_str) == Some(account))
+            .unwrap_or_else(|| panic!("no account {account} in {}", path.display()));
+        let address = entry
+            .get("default_from")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("{account} has a default_from"))
+            .to_string();
+        let server = |port: u16| -> toml::Value {
+            let mut table = toml::Table::new();
+            table.insert("host".into(), "127.0.0.1".into());
+            table.insert("port".into(), i64::from(port).into());
+            table.insert("username".into(), address.clone().into());
+            table.insert("accept_invalid_certs".into(), true.into());
+            toml::Value::Table(table)
+        };
+        entry.insert("smtp".into(), server(self.smtp.port()));
+        let mut imap = match server(self.imap.port()) {
+            toml::Value::Table(table) => table,
+            _ => unreachable!("built as a table"),
+        };
+        imap.insert("sync_interval_secs".into(), 0.into());
+        if with_imap {
+            entry.insert("imap".into(), toml::Value::Table(imap));
+            let mailboxes = entry
+                .entry("mailboxes")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .expect("mailboxes is a table");
+            mailboxes.entry("sent").or_insert_with(|| {
+                let mut sent = toml::Table::new();
+                sent.insert("server".into(), SENT.into());
+                toml::Value::Table(sent)
+            });
+            let mut drafts = toml::Table::new();
+            drafts.insert("mirror".into(), false.into());
+            entry.insert("drafts".into(), toml::Value::Table(drafts));
+        }
+        fs::write(
+            &path,
+            toml::to_string(&config).expect("serialise the configuration"),
+        )
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+
+        use mailypoppins::secrets::{EncryptedFileBackend, SecretsBackend};
+        let secrets = EncryptedFileBackend::open(root.join("secrets.enc"))
+            .expect("the sandbox's secrets file opens");
+        secrets
+            .set(&format!("smtp-password-{account}"), SMTP_PASSWORD)
+            .expect("store the SMTP password");
+        if with_imap {
+            secrets
+                .set(&format!("imap-password-{account}"), IMAP_PASSWORD)
+                .expect("store the IMAP password");
+        }
+    }
+
+    /// Every recipient the SMTP server took a message for, in order, as
+    /// `(Message-ID, recipient, acknowledged)`: the client sends one
+    /// transaction per recipient, and `acknowledged` is false for a message
+    /// the server received and gave no verdict on.
+    pub fn submissions(&self) -> Vec<(String, String, bool)> {
+        self.smtp
+            .deliveries()
+            .into_iter()
+            .flat_map(|delivery| {
+                let message_id = header_of(&delivery.data, "Message-ID");
+                delivery
+                    .recipients
+                    .into_iter()
+                    .map(move |to| (message_id.clone(), to, delivery.acknowledged))
+            })
+            .collect()
+    }
+
+    /// The Message-IDs the SMTP server took, each once, in the order it
+    /// first took them.
+    pub fn submitted_message_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for (message_id, _, _) in self.submissions() {
+            if !ids.contains(&message_id) {
+                ids.push(message_id);
+            }
+        }
+        ids
+    }
+
+    /// How many copies of `message_id` the server's [`SENT`] folder holds.
+    pub fn sent_copies_of(&self, message_id: &str) -> usize {
+        self.imap
+            .contents(SENT)
+            .iter()
+            .filter(|held| held.message_id == message_id)
+            .count()
+    }
+
+    /// How many `SEARCH`es the IMAP server ran in its [`SENT`] folder: the
+    /// outbox's dedup lookups, the only search an account wired here makes.
+    pub fn sent_searches(&self) -> usize {
+        self.imap
+            .searches()
+            .iter()
+            .filter(|(folder, _)| folder == SENT)
+            .count()
+    }
+
+    /// Every recipient the SMTP server refused at `RCPT`, in order, with
+    /// the reply it gave.
+    pub fn refused_recipients(&self) -> Vec<(String, String)> {
+        self.smtp
+            .rcpts()
+            .into_iter()
+            .filter_map(|rcpt| rcpt.refusal.map(|reply| (rcpt.address, reply)))
+            .collect()
+    }
+
+    /// Whether nothing reached either server: no recipient named to the
+    /// SMTP server and no copy filed in [`SENT`].
+    pub fn untouched(&self) -> bool {
+        self.smtp.rcpts().is_empty() && self.imap.contents(SENT).is_empty()
+    }
+}
+
+/// The header `name` of `raw`, unfolded, empty when it has none.
+pub fn header_of(raw: &[u8], name: &str) -> String {
+    let (headers, _) = mailparse::parse_headers(raw).expect("headers");
+    headers
+        .iter()
+        .find(|h| h.get_key().eq_ignore_ascii_case(name))
+        .map(|h| h.get_value())
+        .unwrap_or_default()
+}
+
 /// Poll `done` every [`TICK`](super::parity::TICK) until it holds, and fail
 /// the test naming `what` after [`DEADLINE`](super::parity::DEADLINE): for
 /// what the daemon finishes after the command that started it answered.

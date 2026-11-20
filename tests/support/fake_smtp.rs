@@ -15,7 +15,8 @@
 //! every AUTH PLAIN and AUTH LOGIN with the username and password it carried
 //! ([`RecordingSmtpServer::logins`]), and every message a DATA brought in,
 //! its envelope and its bytes with the dot-stuffing undone (RFC 5321 4.5.2,
-//! [`RecordingSmtpServer::deliveries`]).
+//! [`RecordingSmtpServer::deliveries`]), and every `RCPT TO` with the refusal
+//! it got ([`RecordingSmtpServer::rcpts`]).
 //!
 //! A test changes the answer to any step of the conversation
 //! ([`RecordingSmtpServer::answer`]), or to a step of the transaction of one
@@ -62,6 +63,17 @@ pub struct SmtpDelivery {
     /// message it stalled or hung up on was received all the same, and is
     /// what a client that got no verdict cannot tell from one delivered.
     pub acknowledged: bool,
+}
+
+/// One `RCPT TO` the server was given in a transaction, whatever it
+/// answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmtpRcpt {
+    /// The forward-path, without its brackets.
+    pub address: String,
+    /// The `4xx` or `5xx` reply it got, `None` when the server took it (or
+    /// stalled or hung up on it).
+    pub refusal: Option<String>,
 }
 
 /// The steps of a conversation a test can change the answer to.
@@ -112,6 +124,8 @@ type RecipientAnswers = HashMap<(String, SmtpStep), (SmtpAnswer, Option<usize>)>
 struct Shared {
     logins: Mutex<Vec<SmtpLogin>>,
     deliveries: Mutex<Vec<SmtpDelivery>>,
+    /// Every `RCPT TO` of a transaction, in order.
+    rcpts: Mutex<Vec<SmtpRcpt>>,
     /// The answer of each step for every recipient.
     answers: Mutex<HashMap<SmtpStep, SmtpAnswer>>,
     /// The answer of a step of one recipient's transaction, keyed by the
@@ -211,6 +225,12 @@ impl RecordingSmtpServer {
             .lock()
             .expect("the delivery list")
             .clone()
+    }
+
+    /// Every `RCPT TO` of a transaction so far, in order, with the refusal
+    /// it got: a recipient the server refused is in no delivery.
+    pub fn rcpts(&self) -> Vec<SmtpRcpt> {
+        self.shared.rcpts.lock().expect("the RCPT list").clone()
     }
 
     /// Answer every later `step` with `answer`, or as a server that takes
@@ -469,6 +489,13 @@ async fn serve(
                 if matches!(&answer, Next::Write(reply) if !refused(reply)) {
                     recipients.extend(named.clone());
                 }
+                shared.rcpts.lock().expect("the RCPT list").push(SmtpRcpt {
+                    address: named.clone().unwrap_or_default(),
+                    refusal: match &answer {
+                        Next::Write(reply) if refused(reply) => Some(reply.trim_end().to_string()),
+                        _ => None,
+                    },
+                });
                 answer
             }
             "DATA" if recipients.is_empty() => {

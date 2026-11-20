@@ -156,26 +156,25 @@
 //! `store.sqlite3` under an open connection is undefined, and copying it
 //! while its sidecars come and go is torn (PERSO-222).
 //!
-//! # What this fixture cannot reach, and the hook that fixes it
+//! # What this fixture cannot reach, and the servers that fix it
 //!
 //! The fixture's accounts are the read fixture's, which configure no server,
 //! so the parity rows can compare against the pre-daemon oracle. To reach the
-//! success paths over them this slice fixes a daemon-side hook, [`send::FAKE_TRANSPORT_ENV`], in the shape of the
-//! `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` hook `tests/daemon_sync_outcome.rs`
-//! already uses: it serves the SMTP submission and the Sent-mailbox APPEND in
-//! process and writes one line per transport event to a log the test reads.
-//! That makes a successful routed send, the partly-delivered outcome
-//! (`SND-08`), the sent-copy append (`SND-09`) and the racing-drain twin
-//! non-vacuous.
+//! success paths over them a row moves the default account onto the fake
+//! SMTP and IMAP servers of `tests/support/` before its daemon starts
+//! ([`Slice::wired`], [`WireServers`], PERSO-331): the send submits over
+//! STARTTLS and files its Sent copy with an IMAP APPEND, as it does for a
+//! user, and the test reads back what the servers were given. That makes a
+//! successful routed send, the partly-delivered outcome (`SND-08`), the
+//! sent-copy append (`SND-09`) and the racing-drain twin non-vacuous.
 //!
-//! The hook is the daemon's, so the pre-daemon oracle cannot see it: **every
-//! row that uses it is a routed-side assertion, not a parity row**, and each
-//! one says so in its own doc comment. That is the same licence
-//! `tests/daemon_sync_slice.rs` takes for its engine-lock row.
+//! The oracle has no account on those servers: **every wired row is a
+//! routed-side assertion, not a parity row**, and each one says so in its own
+//! doc comment. That is the same licence `tests/daemon_sync_slice.rs` takes
+//! for its engine-lock row.
 //!
-//! The real SMTP conversation and the Sent APPEND over IMAP run in the `wire`
-//! module at the end of this file (PERSO-210), on an account the fake servers
-//! of `tests/support/` serve, with no hook: a send, a refused recipient in the
+//! The `wire` module at the end of this file runs the same servers under an
+//! account of their own (PERSO-210): a send, a refused recipient in the
 //! server's words, a send with no verdict parked and retried, and a lost
 //! APPEND answer deduped on retry.
 //!
@@ -197,8 +196,8 @@
 //! - `two_racing_drains_append_each_row_exactly_once` is twinned as
 //!   [`two_racing_routed_drains_append_each_row_exactly_once`]: two concurrent
 //!   `send.outbox_retry` operations against one account, one of them parked
-//!   inside its APPEND, and the fake transport's log must hold exactly one
-//!   `append` per message-id.
+//!   inside its APPEND, and the server's Sent folder must hold exactly one
+//!   copy per message-id.
 //! - `a_drain_killed_mid_append_leaves_the_row_reclaimable_and_deduped`
 //!   **is kept direct, deliberately**. It kills a drain *inside* its APPEND by
 //!   dropping the future, which through the daemon would mean killing the
@@ -206,7 +205,8 @@
 //!   stop being about the row. Its reachable half, the dedup that the ambiguity
 //!   arms, is twinned instead as
 //!   [`a_routed_retry_after_a_swallowed_ack_dedupes_rather_than_duplicating`],
-//!   through the hook's `"append": "swallow_ack"` mode.
+//!   through an IMAP server that files each APPEND and hangs up before its
+//!   answer.
 //! - The rest of `outbox_integration.rs` - the crash windows, the backoff, the
 //!   blob accounting, the envelope encoding - is library behaviour every build
 //!   ships and is not re-run here.
@@ -236,15 +236,17 @@ use mp_protocol::send::{
 use mp_protocol::{ErrorCode, RpcError};
 
 use mailypoppins::daemon::dispatch::{CancelScope, MethodKind};
-use mailypoppins::daemon::methods::send::{FAKE_TRANSPORT_ENV, SEND_METHOD_SPECS};
+use mailypoppins::daemon::methods::send::SEND_METHOD_SPECS;
 use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 use mailypoppins::outbox::OutboxState;
 
+use support::fake_smtp::{SmtpAnswer, SmtpStep};
 use support::parity::{
     assert_byte_identical, mp_command, mp_no_daemon, oracle_command, pin_font_size, socket_path,
     DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 use support::send_fixture as fixture;
+use support::wire_fixture::WireServers;
 
 /// Upper bound on any single wait: a connection, a handshake, one call.
 const DEADLINE: Duration = Duration::from_secs(20);
@@ -296,6 +298,9 @@ const _: () = assert!(SEND_METHOD_SPECS.len() == SEND_METHODS.len());
 struct Slice {
     daemon: Option<DaemonFixture>,
     env: Vec<(String, String)>,
+    /// The fake servers the default account submits to and files its Sent
+    /// copies in, for a routed-side row that needs a send to go out.
+    wire: Option<WireServers>,
     tmp: TempDir,
 }
 
@@ -310,7 +315,7 @@ impl Slice {
     ///
     /// `sandbox_env` removes every entry of `DAEMON_ENV_HOOKS`, which is what
     /// keeps a developer's exported variable out of a parity comparison, so a
-    /// test that wants the fake transport has to ask for it here.
+    /// test that wants a hook has to ask for it here.
     fn start_with(env: &[(&str, &str)]) -> Slice {
         let tmp = TempDir::new().expect("a temporary send-slice root");
         fixture::seed(tmp.path());
@@ -323,66 +328,73 @@ impl Slice {
         Slice {
             daemon: Some(daemon),
             env: owned,
+            wire: None,
             tmp,
         }
     }
 
-    /// A root whose daemon serves SMTP and the Sent-mailbox APPEND in process.
-    ///
-    /// The hook's value names the ledger file, which lives under the root, so
-    /// it can only be built once the root exists: `build` is handed the log
-    /// path and returns the hook.
-    fn with_transport(build: impl Fn(&Path) -> String) -> Slice {
+    /// A root whose default account submits to the fake SMTP server and
+    /// files its Sent copies on the fake IMAP server (PERSO-331), as
+    /// [`WireServers::wire`] sets it up, with what `setup` makes of the two
+    /// servers before the daemon starts.
+    fn wired(setup: impl FnOnce(&WireServers)) -> Slice {
+        Slice::wired_with(
+            |_| Vec::new(),
+            |wire, root| {
+                wire.wire(root, fixture::ACCOUNT);
+                setup(wire);
+            },
+        )
+    }
+
+    /// The same, with the hooks `env` builds from the root on top of the
+    /// sandbox, and `wire` given the root to configure: the daemon starts
+    /// once both returned.
+    fn wired_with(
+        env: impl FnOnce(&Path) -> Vec<(String, String)>,
+        wire: impl FnOnce(&WireServers, &Path),
+    ) -> Slice {
         let tmp = TempDir::new().expect("a temporary send-slice root");
         fixture::seed(tmp.path());
         pin_font_size(tmp.path());
-        let hook = build(&fixture::transport_log(tmp.path()));
-        let daemon = DaemonFixture::start_with(tmp.path(), None, &[(FAKE_TRANSPORT_ENV, &hook)]);
+        let servers = WireServers::start();
+        wire(&servers, tmp.path());
+        let env = env(tmp.path());
+        let borrowed: Vec<(&str, &str)> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let daemon = DaemonFixture::start_with(tmp.path(), None, &borrowed);
         Slice {
             daemon: Some(daemon),
-            env: vec![(FAKE_TRANSPORT_ENV.to_string(), hook)],
+            env,
+            wire: Some(servers),
             tmp,
         }
     }
 
-    /// The same, with a transport that accepts every recipient and files the
-    /// copy.
-    fn with_fake_transport() -> Slice {
-        Slice::with_transport(fixture::fake_transport)
-    }
-
-    /// That transport, plus the hook that holds every commit point until its
+    /// A wired root plus the hook that holds every commit point until its
     /// operation is cancelled, its markers in [`fixture::commit_hold_dir`].
     fn with_commit_hold() -> Slice {
-        let tmp = TempDir::new().expect("a temporary send-slice root");
-        fixture::seed(tmp.path());
-        pin_font_size(tmp.path());
-        let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
-        let hold = fixture::commit_hold_dir(tmp.path())
-            .to_string_lossy()
-            .into_owned();
-        let env = [
-            (FAKE_TRANSPORT_ENV, hook.as_str()),
-            (FAKE_COMMIT_HOLD_ENV, hold.as_str()),
-        ];
-        let daemon = DaemonFixture::start_with(tmp.path(), None, &env);
-        Slice {
-            daemon: Some(daemon),
-            env: env
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-                .collect(),
-            tmp,
-        }
+        Slice::wired_with(
+            |root| {
+                let hold = fixture::commit_hold_dir(root);
+                vec![(
+                    FAKE_COMMIT_HOLD_ENV.to_string(),
+                    hold.to_string_lossy().into_owned(),
+                )]
+            },
+            |wire, root| wire.wire(root, fixture::ACCOUNT),
+        )
     }
 
     fn root(&self) -> &Path {
         self.tmp.path()
     }
 
-    /// The fake transport's ledger under this root.
-    fn log(&self) -> std::path::PathBuf {
-        fixture::transport_log(self.root())
+    /// The fake servers of a wired root.
+    fn wire(&self) -> &WireServers {
+        self.wire
+            .as_ref()
+            .expect("this row's root is wired to the fake servers")
     }
 
     fn daemon(&self) -> &DaemonFixture {
@@ -1214,10 +1226,11 @@ async fn an_invitation_cancelled_before_its_submission_sends_nothing() {
         "{status}"
     );
 
-    let events = fixture::transport_events(&slice.log());
     assert!(
-        events.is_empty(),
-        "a cancelled invitation reached the transport: {events:?}"
+        slice.wire().untouched(),
+        "a cancelled invitation reached the servers: {:?}, {:?}",
+        slice.wire().smtp.rcpts(),
+        slice.wire().imap.contents(support::wire_fixture::SENT)
     );
     assert_eq!(
         fixture::all_rows(slice.root(), fixture::ACCOUNT),
@@ -2544,20 +2557,20 @@ fn the_require_gate_and_the_unavailable_exit_agree() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. The successful paths, through the fake transport
+// 11. The successful paths, over the fake servers
 // ---------------------------------------------------------------------------
 //
-// Every test below sets `FAKE_TRANSPORT_ENV` on the daemon, which the
-// pre-daemon oracle knows nothing about. They are **routed-side assertions,
-// not parity rows**, and they exist because without them the slice's whole
-// success half - a message that goes out, a draft that is retired, a Sent copy
-// that is filed - would be unpinned.
+// Every test below moves the default account onto the fake SMTP and IMAP
+// servers ([`Slice::wired`]), which the pre-daemon oracle has no account on.
+// They are **routed-side assertions, not parity rows**, and they exist because
+// without them the slice's whole success half - a message that goes out, a
+// draft that is retired, a Sent copy that is filed - would be unpinned.
 
 /// A routed `mp send -y` delivers, retires the draft, files the Sent copy and
 /// prints the success line.
 ///
-/// Routed side only (fake transport). What it proves is the shape of a
-/// successful send end to end: the transport saw the recipients, the outbox
+/// Routed side only (fake servers). What it proves is the shape of a
+/// successful send end to end: the SMTP server took the message, the outbox
 /// row reached `done`, the draft file is gone from `drafts/`, and the line the
 /// user reads came out of the daemon's own outcome.
 ///
@@ -2572,7 +2585,7 @@ fn the_require_gate_and_the_unavailable_exit_agree() {
 /// row in the outbox.
 #[test]
 fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
 
     let out = slice.routed(&["send", &selector, "-y"]);
@@ -2610,27 +2623,21 @@ fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
         "and that row is finished: SMTP took it and the Sent copy is filed"
     );
 
-    let events = fixture::transport_events(&slice.log());
-    assert!(
-        !events.is_empty(),
-        "the fake transport served the send rather than the send being skipped"
-    );
+    let submitted = slice.wire().submitted_message_ids();
     // SND-09 is about *this* message's copy, counted by its Message-ID rather
-    // than by the ledger's length: the send drains the account's outbox on its
-    // way out, so the seeded row that was waiting on its APPEND
+    // than by the Sent folder's size: the send drains the account's outbox on
+    // its way out, so the seeded row that was waiting on its APPEND
     // (`APPENDING_ROW`) files its copy in the same run and a total of two is
     // the drain doing its job.
-    let mid = events
-        .iter()
-        .find_map(|event| match event {
-            fixture::TransportEvent::Submit { message_id, .. } => Some(message_id.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("the send submitted nothing: {events:?}"));
+    let mid = submitted
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("the send submitted nothing"));
     assert_eq!(
-        fixture::appends_of(&slice.log(), &mid),
+        slice.wire().sent_copies_of(&mid),
         1,
-        "SND-09: exactly one Sent copy, and it was filed by this send: {events:?}"
+        "SND-09: exactly one Sent copy, and it was filed by this send: {:?}",
+        slice.wire().imap.contents(support::wire_fixture::SENT)
     );
     assert!(
         !text.contains(".sqlite3") && !text.contains("/blobs/"),
@@ -2641,7 +2648,7 @@ fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
 /// PERSO-317: `mp path` on the selector of a draft that has gone out says it
 /// was already sent, instead of the "no match" that reads as a wrong selector.
 ///
-/// Routed side only (fake transport). The send is the real one, `mp send -y`
+/// Routed side only (fake servers). The send is the real one, `mp send -y`
 /// through the daemon, so the draft ends where a sent draft really ends: marked
 /// `status: sent` with its `sent_at:` and `message_id:`, and retired into
 /// `drafts/.retired/`, out of the directory the drafts index scans. Those
@@ -2650,7 +2657,7 @@ fn a_routed_send_delivers_retires_the_draft_and_files_the_copy() {
 /// index itself keeps no row for a retired draft.
 #[test]
 fn mp_path_on_a_sent_draft_says_it_was_already_sent() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
 
     let sent = slice.routed(&["send", &selector, "-y"]);
@@ -2722,7 +2729,7 @@ fn mp_path_on_a_sent_draft_says_it_was_already_sent() {
 /// really went out.
 #[test]
 fn mp_path_on_a_draft_that_never_existed_still_answers_no_match() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let selector = fixture::selector(fixture::ACCOUNT, fixture::UNKNOWN_DRAFT);
 
     let out = slice.routed(&["path", &selector]);
@@ -2737,6 +2744,16 @@ fn mp_path_on_a_draft_that_never_existed_still_answers_no_match() {
         "{err}"
     );
     assert!(!err.contains("already sent"), "{err}");
+}
+
+/// The SMTP server refuses [`fixture::REJECTED`] at `RCPT` for good, with
+/// [`fixture::REJECTION`], and takes every other recipient.
+fn refusing_the_rejected_recipient(wire: &WireServers) {
+    wire.smtp.answer_for(
+        fixture::REJECTED,
+        SmtpStep::Rcpt,
+        Some(SmtpAnswer::reply(fixture::REJECTION)),
+    );
 }
 
 /// One frontmatter value of a draft record, as its line spells it with the
@@ -2788,10 +2805,10 @@ fn stored_sent_copies(root: &Path, message_id: &str) -> Vec<String> {
 /// selector, and `mp show` reads it; the daemon's `-32602` carries the same
 /// facts as fields.
 ///
-/// Routed side only (fake transport, APPEND acknowledged).
+/// Routed side only (fake servers, APPEND acknowledged).
 #[tokio::test]
 async fn a_sent_draft_whose_copy_is_stored_names_the_copy_mp_show_reads() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let (selector, record) = send_the_approved_draft(&slice);
     let sent_at = frontmatter_value(&record, "sent_at");
     let message_id = frontmatter_value(&record, "message_id");
@@ -2861,10 +2878,13 @@ async fn a_sent_draft_whose_copy_is_stored_names_the_copy_mp_show_reads() {
 /// then names the `Message-ID` it went out with, and the daemon's `-32602`
 /// carries `sent_copy: null`.
 ///
-/// Routed side only (fake transport, APPEND refused).
+/// Routed side only (fake servers, APPEND refused).
 #[tokio::test]
 async fn a_sent_draft_whose_copy_is_not_stored_names_its_message_id() {
-    let slice = Slice::with_transport(|log| fixture::fake_transport_appending(log, "fail", 0));
+    let slice = Slice::wired(|wire| {
+        wire.imap
+            .refuse("APPEND", Some("NO [SERVERBUG] the Sent folder refused it"))
+    });
     let (selector, record) = send_the_approved_draft(&slice);
     let sent_at = frontmatter_value(&record, "sent_at");
     let message_id = frontmatter_value(&record, "message_id");
@@ -2916,7 +2936,7 @@ async fn a_sent_draft_whose_copy_is_not_stored_names_its_message_id() {
 /// sent record answers "already sent".
 #[test]
 fn mp_path_on_a_discarded_draft_still_answers_no_match() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let made = slice.routed(&["new", "verworfen"]);
     assert_eq!(made.status.code(), Some(0), "{}", stderr(&made));
     let selector = stdout(&made).trim().to_string();
@@ -2962,13 +2982,13 @@ fn mp_path_on_a_discarded_draft_still_answers_no_match() {
 
 /// The CLI send path does not wait out the undo-send hold.
 ///
-/// Routed side only (fake transport). `SND-04`'s default is twenty seconds and
+/// Routed side only (fake servers). `SND-04`'s default is twenty seconds and
 /// `ANO-7` records that `mp send` bypasses it; Phase 6 moves the hold into the
 /// daemon and must keep that true, so the bound is asserted rather than
 /// assumed.
 #[test]
 fn a_routed_send_delivers_without_waiting_out_a_hold() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
 
     let start = Instant::now();
@@ -2986,15 +3006,13 @@ fn a_routed_send_delivers_without_waiting_out_a_hold() {
 /// delivered row, a warning rather than a failure, and a listing an operator
 /// can act on.
 ///
-/// Routed side only (fake transport). The refused address is
+/// Routed side only (fake servers). The refused address is
 /// [`fixture::REJECTED`], which the fixture puts on the approved draft's `cc:`
 /// line for exactly this row: a draft with one recipient is delivered whole or
 /// refused whole, and "partly" needs two.
 #[test]
 fn a_routed_send_whose_recipient_is_refused_is_partly_delivered() {
-    let slice = Slice::with_transport(|log| {
-        fixture::fake_transport_rejecting(log, &[(fixture::REJECTED, fixture::REJECTION)])
-    });
+    let slice = Slice::wired(refusing_the_rejected_recipient);
 
     let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
     let out = slice.routed(&["send", &selector, "-y"]);
@@ -3022,10 +3040,10 @@ fn a_routed_send_whose_recipient_is_refused_is_partly_delivered() {
 /// A routed `mp outbox retry` re-arms the parked row, drains it and reports
 /// both the new state and the copies it filed.
 ///
-/// Routed side only (fake transport).
+/// Routed side only (fake servers).
 #[test]
 fn a_routed_outbox_retry_rearms_and_drains_the_parked_row() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let id = fixture::FAILED_ROW.to_string();
 
     let out = slice.routed(&["outbox", "retry", &id]);
@@ -3045,7 +3063,7 @@ fn a_routed_outbox_retry_rearms_and_drains_the_parked_row() {
         "and what became of the row:\n{text}"
     );
     assert_eq!(
-        fixture::appends_of(&slice.log(), fixture::FAILED_MID),
+        slice.wire().sent_copies_of(fixture::FAILED_MID),
         1,
         "exactly one copy in Sent for the row that was retried"
     );
@@ -3056,10 +3074,10 @@ fn a_routed_outbox_retry_rearms_and_drains_the_parked_row() {
 /// retry drains the account's whole outbox, so every row it finished is
 /// counted, once each: what a rebuild of the store then counts.
 ///
-/// Routed side only (fake transport).
+/// Routed side only (fake servers).
 #[test]
 fn a_routed_outbox_retry_counts_the_recipient_it_delivered_to() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let rebuilt = slice.routed(&["contacts", "rebuild", "-A", fixture::ACCOUNT]);
     assert_eq!(rebuilt.status.code(), Some(0), "{}", stderr(&rebuilt));
     let cache = fixture::account_dir(slice.root(), fixture::ACCOUNT).join("contacts-cache.json");
@@ -3087,12 +3105,12 @@ fn a_routed_outbox_retry_counts_the_recipient_it_delivered_to() {
 /// because its live send never succeeded: the resume retires that file, or
 /// `mp send-approved` would send the message a second time (#0063 review).
 ///
-/// Routed side only (fake transport). The parked row is made the approved
+/// Routed side only (fake servers). The parked row is made the approved
 /// draft's by its envelope, which is what a live send that failed
 /// ambiguously leaves.
 #[test]
 fn a_routed_outbox_retry_retires_the_draft_the_row_was_built_from() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let store = fixture::store(slice.root(), fixture::ACCOUNT);
     let mut row = mailypoppins::outbox::load(&store, fixture::FAILED_ROW)
         .unwrap()
@@ -3113,7 +3131,7 @@ fn a_routed_outbox_retry_retires_the_draft_the_row_was_built_from() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
     assert_eq!(
-        fixture::appends_of(&slice.log(), fixture::FAILED_MID),
+        slice.wire().sent_copies_of(fixture::FAILED_MID),
         1,
         "the retried row went out once"
     );
@@ -3127,11 +3145,11 @@ fn a_routed_outbox_retry_retires_the_draft_the_row_was_built_from() {
 /// A draft whose newest outbox row is `done` is not sent again, even with the
 /// file still `approved`: the second guard behind retiring it (#0063 review).
 ///
-/// Routed side only (fake transport). The partly delivered seeded row, which
+/// Routed side only (fake servers). The partly delivered seeded row, which
 /// is `done`, is made the approved draft's by its envelope.
 #[test]
 fn a_routed_send_of_a_draft_already_sent_is_refused() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let store = fixture::store(slice.root(), fixture::ACCOUNT);
     let mut row = mailypoppins::outbox::load(&store, fixture::PARTIAL_ROW)
         .unwrap()
@@ -3156,8 +3174,9 @@ fn a_routed_send_of_a_draft_already_sent_is_refused() {
         stderr(&out)
     );
     assert!(
-        fixture::transport_events(&slice.log()).is_empty(),
-        "nothing reached the transport"
+        slice.wire().untouched(),
+        "nothing reached the servers: {:?}",
+        slice.wire().smtp.rcpts()
     );
 }
 
@@ -3165,19 +3184,19 @@ fn a_routed_send_of_a_draft_already_sent_is_refused() {
 /// out (#0063 final review): the refusal clears the submission marker, and the
 /// gate's "may have reached its recipients" check does not hold the draft.
 ///
-/// Routed side only (fake transport). The server refuses both recipients of
-/// the approved draft with a 550; the file is then readdressed to one it
-/// accepts, still `approved`, and sent again.
+/// Routed side only (fake servers). The server refuses both recipients of
+/// the approved draft with a 550 at `RCPT`; the file is then readdressed to
+/// one it accepts, still `approved`, and sent again.
 #[test]
 fn a_routed_send_refused_by_every_recipient_can_be_corrected_and_sent() {
-    let slice = Slice::with_transport(|log| {
-        fixture::fake_transport_rejecting(
-            log,
-            &[
-                ("ivana@example.com", fixture::REJECTION),
-                (fixture::REJECTED, fixture::REJECTION),
-            ],
-        )
+    let slice = Slice::wired(|wire| {
+        for address in ["ivana@example.com", fixture::REJECTED] {
+            wire.smtp.answer_for(
+                address,
+                SmtpStep::Rcpt,
+                Some(SmtpAnswer::reply(fixture::REJECTION)),
+            );
+        }
     });
     let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
     let seeded = [
@@ -3186,31 +3205,31 @@ fn a_routed_send_refused_by_every_recipient_can_be_corrected_and_sent() {
         fixture::PARTIAL_MID,
         fixture::APPENDING_MID,
     ];
-    let submits = |log: &Path| -> Vec<(String, String, bool)> {
-        fixture::transport_events(log)
+    // What the server took of a message this test sent, the seeded rows a
+    // drain may send beside it left out.
+    let submits = |wire: &WireServers| -> Vec<(String, String, bool)> {
+        wire.submissions()
             .into_iter()
-            .filter_map(|event| match event {
-                fixture::TransportEvent::Submit {
-                    message_id,
-                    address,
-                    accepted,
-                } if !seeded.contains(&message_id.as_str()) => {
-                    Some((message_id, address, accepted))
-                }
-                _ => None,
-            })
+            .filter(|(message_id, _, _)| !seeded.contains(&message_id.as_str()))
             .collect()
     };
 
     let first = slice.routed(&["send", &selector, "-y"]);
-    let refused = submits(&slice.log());
+    let refused: Vec<String> = slice
+        .wire()
+        .refused_recipients()
+        .into_iter()
+        .map(|(address, _)| address)
+        .collect();
     assert!(
-        !refused.is_empty() && refused.iter().all(|(_, _, accepted)| !accepted),
-        "every recipient refused the first send: {refused:?}\nstdout: {}\nstderr: {}",
+        refused.iter().any(|a| a == "ivana@example.com")
+            && refused.iter().any(|a| a == fixture::REJECTED)
+            && submits(slice.wire()).is_empty(),
+        "every recipient refused the first send: {refused:?}, {:?}\nstdout: {}\nstderr: {}",
+        submits(slice.wire()),
         stdout(&first),
         stderr(&first)
     );
-    let first_mid = refused[0].0.clone();
 
     let path = fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(fixture::APPROVED_FILE);
     std::fs::write(
@@ -3233,10 +3252,9 @@ fn a_routed_send_refused_by_every_recipient_can_be_corrected_and_sent() {
         stdout(&second),
         stderr(&second)
     );
-    let resent: Vec<_> = submits(&slice.log())
-        .into_iter()
-        .filter(|(mid, _, _)| *mid != first_mid)
-        .collect();
+    // The first send left nothing on the server, so all it holds of this
+    // test's mail is the corrected send.
+    let resent = submits(slice.wire());
     assert_eq!(
         resent.len(),
         1,
@@ -3250,10 +3268,10 @@ fn a_routed_send_refused_by_every_recipient_can_be_corrected_and_sent() {
 /// row `done` and not partial, so a client tells it from a partly delivered
 /// row, which is `done` too.
 ///
-/// Routed side only (fake transport).
+/// Routed side only (fake servers).
 #[tokio::test]
 async fn a_retry_that_delivers_to_everyone_is_done_and_not_partial() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let mut conn = slice.connect().await;
     let started = call(
         &mut conn,
@@ -3271,19 +3289,18 @@ async fn a_retry_that_delivers_to_everyone_is_done_and_not_partial() {
 /// `tests/outbox_integration.rs::two_racing_drains_append_each_row_exactly_once`,
 /// twinned through the daemon.
 ///
-/// Routed side only (fake transport). Two `send.outbox_retry` operations are
+/// Routed side only (fake servers). Two `send.outbox_retry` operations are
 /// started from two connections against one account, with the first parked
 /// inside its APPEND so the second lands in exactly the window the legacy test
 /// opens with its `Hold::Until`. Whatever the drains decide between them - one
-/// refused by the engine lock, or both serialised behind it - the ledger has
-/// to hold exactly one `append` per message-id, which is the invariant #0116
-/// is about.
+/// refused by the engine lock, or both serialised behind it - the server's
+/// Sent folder has to hold exactly one copy per message-id, which is the
+/// invariant #0116 is about.
 #[tokio::test]
 async fn two_racing_routed_drains_append_each_row_exactly_once() {
-    // The first drain parks for 300 ms inside its APPEND, which is the window
-    // the legacy test opens with its `Hold::Until`.
-    let slice = Slice::with_transport(|log| fixture::fake_transport_appending(log, "ok", 300));
-    let log = slice.log();
+    // The server parks 300 ms inside each APPEND, which is the window the
+    // legacy test opens with its `Hold::Until`.
+    let slice = Slice::wired(|wire| wire.imap.set_append_delay(Duration::from_millis(300)));
 
     let mut first = slice.connect().await;
     let mut second = slice.connect().await;
@@ -3320,10 +3337,10 @@ async fn two_racing_routed_drains_append_each_row_exactly_once() {
     }
 
     assert_eq!(
-        fixture::appends_of(&log, fixture::FAILED_MID),
+        slice.wire().sent_copies_of(fixture::FAILED_MID),
         1,
         "the row two drains raced for must not be appended twice: {:?}",
-        fixture::transport_events(&log)
+        slice.wire().imap.contents(support::wire_fixture::SENT)
     );
     assert_eq!(
         fixture::row_state(slice.root(), fixture::ACCOUNT, fixture::FAILED_ROW),
@@ -3335,25 +3352,24 @@ async fn two_racing_routed_drains_append_each_row_exactly_once() {
 /// The reachable half of
 /// `tests/outbox_integration.rs::a_drain_killed_mid_append_leaves_the_row_reclaimable_and_deduped`.
 ///
-/// Routed side only (fake transport). The killing itself is **kept direct** in
+/// Routed side only (fake servers). The killing itself is **kept direct** in
 /// the legacy suite: it drops a drain future while it is inside its APPEND,
 /// which through the daemon would mean killing the daemon and losing every
 /// other row with it, and the scenario would stop being about the row. What is
 /// reachable here is what the ambiguity arms: a copy the server filed while
 /// the acknowledgement was lost must be found by the dedup search rather than
-/// appended a second time.
+/// appended a second time. The IMAP server files every APPEND and closes the
+/// connection before its answer.
 #[test]
 fn a_routed_retry_after_a_swallowed_ack_dedupes_rather_than_duplicating() {
-    let slice =
-        Slice::with_transport(|log| fixture::fake_transport_appending(log, "swallow_ack", 0));
-    let log = slice.log();
+    let slice = Slice::wired(|wire| wire.imap.hang_up_after_appends(usize::MAX));
     let id = fixture::FAILED_ROW.to_string();
 
     // The first drain files the copy and loses the acknowledgement.
     let first = slice.routed(&["outbox", "retry", &id]);
     assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
     assert_eq!(
-        fixture::appends_of(&log, fixture::FAILED_MID),
+        slice.wire().sent_copies_of(fixture::FAILED_MID),
         1,
         "the server filed it once"
     );
@@ -3367,15 +3383,15 @@ fn a_routed_retry_after_a_swallowed_ack_dedupes_rather_than_duplicating() {
         stderr(&second)
     );
     assert!(
-        fixture::searches(&log) >= 1,
+        slice.wire().sent_searches() >= 1,
         "the reclaim must look before it appends: {:?}",
-        fixture::transport_events(&log)
+        slice.wire().imap.searches()
     );
     assert_eq!(
-        fixture::appends_of(&log, fixture::FAILED_MID),
+        slice.wire().sent_copies_of(fixture::FAILED_MID),
         1,
         "exactly one copy in Sent: {:?}",
-        fixture::transport_events(&log)
+        slice.wire().imap.contents(support::wire_fixture::SENT)
     );
 }
 
@@ -3383,12 +3399,12 @@ fn a_routed_retry_after_a_swallowed_ack_dedupes_rather_than_duplicating() {
 /// `send.draft` result, deserialised into the payload type and handed to the
 /// same formatter the CLI uses.
 ///
-/// Routed side only (fake transport). What is being proved is the path -
+/// Routed side only (fake servers). What is being proved is the path -
 /// operation result on the wire, payload out of it, lines out of the payload -
 /// and not the send.
 #[tokio::test]
 async fn a_send_result_renders_through_the_shared_wordings() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired(|_| {});
     let mut conn = slice.connect().await;
 
     let settled = run_operation(
@@ -3406,14 +3422,9 @@ async fn a_send_result_renders_through_the_shared_wordings() {
     let outcome: SendOutcome = serde_json::from_value(settled["result"].clone())
         .expect("send.draft answers with a SendOutcome");
     assert_eq!(outcome.account, fixture::ACCOUNT);
-    // The Message-ID the build minted, which is the one the transport took
-    // and the one an outbox row is matched by (#0131: it used to be "").
-    let submitted = fixture::transport_events(&slice.log())
-        .into_iter()
-        .find_map(|event| match event {
-            fixture::TransportEvent::Submit { message_id, .. } => Some(message_id),
-            _ => None,
-        });
+    // The Message-ID the build minted, which is the one the server took and
+    // the one an outbox row is matched by (#0131: it used to be "").
+    let submitted = slice.wire().submitted_message_ids().first().cloned();
     assert_eq!(Some(outcome.message_id.clone()), submitted);
     assert_eq!(
         outcome.selector.as_deref(),
@@ -3421,7 +3432,7 @@ async fn a_send_result_renders_through_the_shared_wordings() {
     );
     assert!(
         outcome.recipients.iter().all(|r| r.delivered),
-        "the fake transport accepted everyone: {:?}",
+        "the SMTP server accepted everyone: {:?}",
         outcome.recipients
     );
     assert_eq!(
@@ -3445,11 +3456,14 @@ async fn a_send_result_renders_through_the_shared_wordings() {
 /// both `send.draft` and the `send.approved` batch go through the guard, and
 /// nothing reaches the transport.
 ///
-/// Routed side only (fake transport). The fixture account has no IMAP
+/// Routed side only (fake SMTP server). The fixture account has no IMAP
 /// server configured, which is a Drafts folder the guard cannot reach.
 #[tokio::test]
 async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
-    let slice = Slice::with_fake_transport();
+    let slice = Slice::wired_with(
+        |_| Vec::new(),
+        |wire, root| wire.wire_smtp_only(root, fixture::ACCOUNT),
+    );
     let path = fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(fixture::APPROVED_FILE);
     let text = std::fs::read_to_string(&path).unwrap();
     let pushed = text.replacen(
@@ -3495,10 +3509,7 @@ async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
         "{outcome:?}"
     );
 
-    let submitted: Vec<_> = fixture::transport_events(&slice.log())
-        .into_iter()
-        .filter(|event| matches!(event, fixture::TransportEvent::Submit { .. }))
-        .collect();
+    let submitted = slice.wire().smtp.rcpts();
     assert!(submitted.is_empty(), "nothing went out: {submitted:?}");
     assert!(path.exists(), "the draft stays");
 }
@@ -3511,13 +3522,11 @@ async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
 /// wording: the client renders the line, with the formatter it uses at the
 /// settle.
 ///
-/// Routed side only (fake transport): one draft partly delivered and one
+/// Routed side only (fake servers): one draft partly delivered and one
 /// refused by its only recipient.
 #[tokio::test]
 async fn send_approved_reports_each_draft_as_it_settles() {
-    let slice = Slice::with_transport(|log| {
-        fixture::fake_transport_rejecting(log, &[(fixture::REJECTED, fixture::REJECTION)])
-    });
+    let slice = Slice::wired(refusing_the_rejected_recipient);
     std::fs::write(
         fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join("abgelehnt.md"),
         support::draft_fixture::document(
@@ -3606,12 +3615,10 @@ async fn send_approved_reports_each_draft_as_it_settles() {
 /// `mp send-approved -y` through a pipe: one whole line per draft, each said
 /// once, the failure among them, then the summary with the counts alone.
 ///
-/// Routed side only (fake transport).
+/// Routed side only (fake servers).
 #[test]
 fn a_routed_send_approved_prints_each_draft_once_and_the_counts_after() {
-    let slice = Slice::with_transport(|log| {
-        fixture::fake_transport_rejecting(log, &[(fixture::REJECTED, fixture::REJECTION)])
-    });
+    let slice = Slice::wired(refusing_the_rejected_recipient);
     std::fs::write(
         fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join("abgelehnt.md"),
         support::draft_fixture::document(
