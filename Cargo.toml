@@ -122,6 +122,10 @@ mp-core = { path = "crates/mp-core", features = ["test-support"] }
 # previews and renders the golden-frame fixtures, all of which were
 # `#[cfg(test)]` while the TUI was a module of this crate.
 mp-tui = { path = "clients/tui", features = ["test-support"] }
+# Paused time (`tokio::time::pause`): `src/send/deadline_tests.rs` stops the
+# clock once a fake SMTP server falls silent, so a submission's deadline fires
+# without waiting it out in wall-clock time (PERSO-342).
+tokio = { version = "1", features = ["test-util"] }
 
 # Line tables keep file:line in backtraces but drop full debug info: test binaries
 # shrink several-fold, and cargo never deletes stale ones from target/debug.

@@ -2,15 +2,19 @@
 //! nothing ends the submission at its deadline, with no verdict, instead of
 //! holding it, and the outbox row in "sending", until the daemon restarts.
 //!
-//! Against the STARTTLS fake the daemon suites use, with a budget of half a
-//! second through [`submit_over_bounded`], so no test waits minutes.
+//! Against the STARTTLS fake the daemon suites use, through
+//! [`submit_over_bounded`] with a budget of its own ([`BUDGET`]), so no test
+//! waits minutes: once the fake has fallen silent, the test stops tokio's
+//! clock ([`at_its_silence`]) and the deadline fires at once, however loaded
+//! the machine, rather than after a stretch of wall-clock time a slow
+//! conversation could outrun.
 //!
 //! Beside them, a connection never set up, which sent nothing and says so.
 
 use super::*;
 use crate::outbox::{self, OutboxState, SubmitOutcome};
 use crate::store::{BlobStore, Store};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::fake_smtp::{RecordingSmtpServer, SmtpAnswer, SmtpStep};
 
@@ -31,6 +35,9 @@ enum SilentAfter {
 trait Silent {
     fn start_silent(silence: SilentAfter) -> Self;
     fn messages(&self) -> usize;
+    /// The fake came to `silence` and has said nothing since, with what
+    /// the test checks there recorded.
+    fn fell_silent(&self, silence: SilentAfter) -> bool;
 }
 
 impl Silent for RecordingSmtpServer {
@@ -48,16 +55,59 @@ impl Silent for RecordingSmtpServer {
     fn messages(&self) -> usize {
         self.deliveries().len()
     }
+
+    fn fell_silent(&self, silence: SilentAfter) -> bool {
+        match silence {
+            SilentAfter::Accept => self.reached(SmtpStep::Greeting) > 0,
+            // The login is recorded before the step is counted.
+            SilentAfter::Auth => self.reached(SmtpStep::Auth) > 0,
+            // The message is recorded after the step is counted.
+            SilentAfter::Data => self.messages() > 0,
+        }
+    }
 }
 
-/// Half a second for the whole conversation, nothing for the upload.
+/// The whole conversation, nothing for the upload: 20 s, a hundred times what
+/// the fake takes to come to any of its silences, so on a loaded machine too
+/// the deadline cuts a conversation only where the fake fell silent. A test
+/// does not wait it out: [`at_its_silence`] stops the clock there. Under the
+/// transport's 30 s connect timeout, so the deadline is the first timer due.
 const BUDGET: SubmissionBudget = SubmissionBudget {
-    conversation: Duration::from_millis(500),
+    conversation: Duration::from_secs(20),
     per_mib: Duration::ZERO,
 };
 
 /// Long past [`BUDGET`]: a submission still running then never ends.
-const NEVER: Duration = Duration::from_secs(10);
+const NEVER: Duration = Duration::from_secs(60);
+
+/// Drive `submission` until `server` falls silent at `silence`, then stop
+/// tokio's clock: with nothing more coming from the fake, the runtime idles
+/// and the clock jumps to its next timer, the submission's deadline, which
+/// fires at once rather than after [`BUDGET`] of wall-clock time; a
+/// submission with no deadline runs on to [`NEVER`] and fails its test all
+/// the same. A submission that ended before the fake fell silent is handed
+/// back as it is, for the test's assertions to catch.
+///
+/// Tokio's clock stops only on a current-thread runtime, `#[tokio::test]`'s
+/// default, and stays stopped to the end of the test.
+async fn at_its_silence<T>(
+    server: &RecordingSmtpServer,
+    silence: SilentAfter,
+    submission: impl std::future::Future<Output = T>,
+) -> T {
+    tokio::pin!(submission);
+    let silent = async {
+        while !server.fell_silent(silence) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::select! {
+        ended = &mut submission => return ended,
+        () = silent => {}
+    }
+    tokio::time::pause();
+    submission.await
+}
 
 /// The fake's account, with a user of its own per port, since the login
 /// gate keys a login by its user and tests run side by side.
@@ -87,32 +137,58 @@ fn built(message_id: &str, recipients: &[&str]) -> BuiltMessage {
     }
 }
 
-/// The real submission over the production transport, with [`BUDGET`].
-struct BoundedSmtp;
+/// The real submission over the production transport, with [`BUDGET`], to
+/// a fake that falls silent at a step of the conversation, whose deadline
+/// then fires at once ([`at_its_silence`]), or that never does.
+struct BoundedSmtp<'a> {
+    silent: Option<(&'a RecordingSmtpServer, SilentAfter)>,
+}
 
-impl SmtpSubmit for BoundedSmtp {
+/// [`BoundedSmtp`] to a server that answers, or that is never reached.
+const ANSWERING: BoundedSmtp<'static> = BoundedSmtp { silent: None };
+
+impl SmtpSubmit for BoundedSmtp<'_> {
     async fn submit(&self, built: &BuiltMessage, smtp_config: &SmtpConfig) -> Result<SendResult> {
         let mailer = build_smtp_transport(smtp_config)?;
-        submit_over_bounded(
+        let submission = submit_over_bounded(
             built,
             smtp_config,
             &mailer,
             crate::login_gate::LOGIN_DEADLINE,
             BUDGET,
-        )
-        .await
+        );
+        match self.silent {
+            None => submission.await,
+            Some((server, silence)) => at_its_silence(server, silence, submission).await,
+        }
     }
 }
 
-/// Submit `built` to `server`, failing the test if the submission outlives
-/// [`NEVER`].
+/// Submit `built` to `server`, which answers every step, failing the test
+/// if the submission outlives [`NEVER`].
 async fn submit_to(server: &RecordingSmtpServer, built: &BuiltMessage) -> SendResult {
-    submit_with(&config(server.port()), built).await
+    submit_with(&config(server.port()), built, &ANSWERING).await
 }
 
-/// [`submit_to`] with the configuration handed in.
-async fn submit_with(config: &SmtpConfig, built: &BuiltMessage) -> SendResult {
-    tokio::time::timeout(NEVER, BoundedSmtp.submit(built, config))
+/// [`submit_to`] a server that falls silent at `silence`.
+async fn submit_to_silent(
+    server: &RecordingSmtpServer,
+    silence: SilentAfter,
+    built: &BuiltMessage,
+) -> SendResult {
+    let smtp = BoundedSmtp {
+        silent: Some((server, silence)),
+    };
+    submit_with(&config(server.port()), built, &smtp).await
+}
+
+/// [`submit_to`] with the configuration and the submission handed in.
+async fn submit_with(
+    config: &SmtpConfig,
+    built: &BuiltMessage,
+    smtp: &BoundedSmtp<'_>,
+) -> SendResult {
+    tokio::time::timeout(NEVER, smtp.submit(built, config))
         .await
         .expect("the submission ends at its deadline")
         .expect("a submission that ran out of time is a result, not an error")
@@ -159,8 +235,9 @@ async fn a_server_that_answers_is_delivered_within_the_budget() {
 #[tokio::test]
 async fn a_server_silent_after_accept_ends_the_send_with_no_verdict() {
     let server = RecordingSmtpServer::start_silent(SilentAfter::Accept);
-    let result = submit_to(
+    let result = submit_to_silent(
         &server,
+        SilentAfter::Accept,
         &built("<silent-accept@example.com>", &["bob@example.com"]),
     )
     .await;
@@ -171,8 +248,9 @@ async fn a_server_silent_after_accept_ends_the_send_with_no_verdict() {
 #[tokio::test]
 async fn a_server_silent_after_auth_ends_the_send_with_no_verdict() {
     let server = RecordingSmtpServer::start_silent(SilentAfter::Auth);
-    let result = submit_to(
+    let result = submit_to_silent(
         &server,
+        SilentAfter::Auth,
         &built("<silent-auth@example.com>", &["bob@example.com"]),
     )
     .await;
@@ -186,8 +264,9 @@ async fn a_server_silent_after_auth_ends_the_send_with_no_verdict() {
 #[tokio::test]
 async fn a_server_silent_after_the_final_dot_ends_the_send_with_no_verdict() {
     let server = RecordingSmtpServer::start_silent(SilentAfter::Data);
-    let result = submit_to(
+    let result = submit_to_silent(
         &server,
+        SilentAfter::Data,
         &built("<silent-data@example.com>", &["bob@example.com"]),
     )
     .await;
@@ -197,13 +276,16 @@ async fn a_server_silent_after_the_final_dot_ends_the_send_with_no_verdict() {
 
 /// The recipients after one whose submission ran out of time are not tried,
 /// each of which would wait out a deadline of its own against a server that
-/// has stopped answering: they are left for a later send.
+/// has stopped answering: they are left for a later send. Tokio's clock
+/// stops once the fake falls silent ([`at_its_silence`]), so the time the
+/// send took is the first deadline and nothing more, whatever the load.
 #[tokio::test]
 async fn the_recipients_after_a_deadline_are_left_for_a_later_send() {
     let server = RecordingSmtpServer::start_silent(SilentAfter::Data);
-    let started = Instant::now();
-    let result = submit_to(
+    let started = tokio::time::Instant::now();
+    let result = submit_to_silent(
         &server,
+        SilentAfter::Data,
         &built(
             "<silent-data-two@example.com>",
             &["bob@example.com", "carol@example.com"],
@@ -238,6 +320,9 @@ async fn a_drain_against_a_silent_server_parks_the_row() {
     let row = drained(
         &config(server.port()),
         &built("<silent-drain@example.com>", &["bob@example.com"]),
+        &BoundedSmtp {
+            silent: Some((&server, SilentAfter::Data)),
+        },
     )
     .await;
     assert_eq!(row.state, OutboxState::Failed, "{:?}", row.last_error);
@@ -251,8 +336,12 @@ async fn a_drain_against_a_silent_server_parks_the_row() {
 }
 
 /// `built` queued in a fresh outbox for `config`'s account and drained once
-/// through [`BoundedSmtp`]: its row as the drain left it.
-async fn drained(config: &SmtpConfig, built: &BuiltMessage) -> outbox::OutboxRow {
+/// through `smtp`: its row as the drain left it.
+async fn drained(
+    config: &SmtpConfig,
+    built: &BuiltMessage,
+    smtp: &BoundedSmtp<'_>,
+) -> outbox::OutboxRow {
     let account = config.account.clone();
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
@@ -281,7 +370,7 @@ async fn drained(config: &SmtpConfig, built: &BuiltMessage) -> outbox::OutboxRow
         rows,
         outbox::unix_now(),
         config,
-        &BoundedSmtp,
+        smtp,
     );
     tokio::time::timeout(NEVER, drain)
         .await
@@ -302,7 +391,12 @@ async fn drained(config: &SmtpConfig, built: &BuiltMessage) -> outbox::OutboxRow
 /// open, so its state and its retry path stay as they are.
 async fn assert_nothing_sent(config: &SmtpConfig, reason_starts: &str) {
     let message_id = format!("<unreached-{}@example.com>", config.port);
-    let result = submit_with(config, &built(&message_id, &["bob@example.com"])).await;
+    let result = submit_with(
+        config,
+        &built(&message_id, &["bob@example.com"]),
+        &ANSWERING,
+    )
+    .await;
     let bob = &result.results[0];
     assert!(!bob.success);
     let error = bob.error.as_deref().unwrap_or_default();
@@ -311,7 +405,12 @@ async fn assert_nothing_sent(config: &SmtpConfig, reason_starts: &str) {
         "the recipient's reason says why in plain words and that nothing was sent: {error}"
     );
 
-    let row = drained(config, &built(&message_id, &["bob@example.com"])).await;
+    let row = drained(
+        config,
+        &built(&message_id, &["bob@example.com"]),
+        &ANSWERING,
+    )
+    .await;
     assert_eq!(row.state, OutboxState::Failed, "{:?}", row.last_error);
     let last_error = row.last_error.unwrap_or_default();
     assert!(
@@ -326,12 +425,13 @@ async fn assert_nothing_sent(config: &SmtpConfig, reason_starts: &str) {
 
 #[tokio::test]
 async fn a_refused_connect_says_nothing_was_sent() {
-    // A port nothing listens on: bound, then let go.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // A port nothing listens on, held bound for the whole test without a
+    // listen, which the kernel refuses. A port bound and let go is free for
+    // the next bind of port 0, the fake of a test running beside this one
+    // among them, which then took this test's message (PERSO-342).
+    let unlistened = tokio::net::TcpSocket::new_v4().unwrap();
+    unlistened.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = unlistened.local_addr().unwrap().port();
     assert_nothing_sent(
         &config(port),
         &format!("could not connect to 127.0.0.1:{port}: connection refused"),
