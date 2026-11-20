@@ -417,6 +417,10 @@ pub async fn first_sync(
     else {
         return;
     };
+    if cfg.syncs_only_a_calendar() {
+        first_calendar_store(config, runtimes, canonical, mark, cfg).await;
+        return;
+    }
     let request = PassRequest {
         method: "sync.quick",
         account: cfg,
@@ -483,6 +487,44 @@ pub async fn first_sync(
             );
             // Still no runtime, so the table still holds the failed start this
             // replaces; a swap that removed the account meanwhile wins.
+            if runtimes.get(&account).is_none()
+                && config.accounts().iter().any(|a| a.name == account)
+            {
+                canonical.apply(super::super::config::blocked_by_failure(
+                    &runtimes, &account, reason,
+                ));
+            }
+        }
+    }
+}
+
+/// The first sync of an account whose one server is its calendar's
+/// (PERSO-318): no mail pass, only the store its calendar cache lives in,
+/// and then the runtime, whose first scheduled tick syncs the calendar a few
+/// seconds later ([`super::super::runtime::scheduler::STARTUP_TICK`]). A
+/// store that cannot be created leaves the account `blocked` with why.
+async fn first_calendar_store(
+    config: Arc<ConfigStore>,
+    runtimes: Arc<RuntimeTable>,
+    canonical: Arc<CanonicalState>,
+    mark: FirstSyncMark,
+    cfg: AccountConfig,
+) {
+    let account = cfg.name.clone();
+    log::info!("[daemon] {account} syncs only its calendar; creating its local store");
+    let path = crate::config::store_path(&account);
+    let created = tokio::task::spawn_blocking(move || crate::store::Store::open(path).map(drop))
+        .await
+        .map_err(|e| anyhow::anyhow!("the store task {e}"))
+        .and_then(|created| created);
+    drop(mark);
+    match created {
+        Ok(()) => {
+            super::super::config::start_after_first_sync(&config, &runtimes, &canonical, &account)
+                .await;
+        }
+        Err(e) => {
+            let reason = format!("creating the local store of {account} failed: {e:#}");
             if runtimes.get(&account).is_none()
                 && config.accounts().iter().any(|a| a.name == account)
             {

@@ -883,7 +883,8 @@ pub async fn start_after_first_sync(
 }
 
 /// Run the first sync of `account` in the background when it has never been
-/// synced: account runtimes on, a server configured, no runtime and no store.
+/// synced: account runtimes on, a server configured (a calendar's alone
+/// counts, PERSO-318), no runtime and no store.
 ///
 /// What every mail client does after an account is added, and the reason a
 /// new account no longer waits in `blocked` for a `mp sync` and a daemon
@@ -901,7 +902,7 @@ pub fn spawn_first_sync_if_new(
     let Some(cfg) = store.accounts().iter().find(|a| a.name == account).cloned() else {
         return;
     };
-    if cfg.is_local_only()
+    if (cfg.is_local_only() && !cfg.syncs_only_a_calendar())
         || cfg.auth_method == AuthMethod::RetiredOAuth2
         || crate::config::store_path(account).exists()
     {

@@ -944,7 +944,24 @@ impl AccountRuntime {
                     calendar_changed: false,
                 }
             } else {
-                let outcome = self.run_tick(kind, stop).await;
+                let outcome = if self.config.syncs_only_a_calendar() {
+                    // No mail server to drain into or sync from (PERSO-318):
+                    // the calendar half below is the whole tick.
+                    TickOutcome {
+                        kind,
+                        phases: Vec::new(),
+                        joined: false,
+                        blocked: false,
+                        body_deadline: self.body_deadline,
+                        status: String::new(),
+                        error: None,
+                        sync: None,
+                        contacts: None,
+                        calendar_changed: false,
+                    }
+                } else {
+                    self.run_tick(kind, stop).await
+                };
                 // Whatever asked for it: a manual sync, the watcher, a
                 // client's startup fetch or the scheduler all push the next
                 // scheduled tick back (#0134), and wake the judges (PERSO-186).

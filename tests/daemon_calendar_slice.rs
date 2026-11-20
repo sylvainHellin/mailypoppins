@@ -759,6 +759,81 @@ async fn a_tick_syncs_the_calendar_and_announces_it() {
     assert_eq!(listed["calendars"].as_array().unwrap().len(), 3, "{listed}");
 }
 
+/// The calendar-only EWS account of [`calendar_only`]: a calendar backend and
+/// no IMAP, SMTP or Graph mail, ticked every second.
+const CALENDAR_ONLY: &str = "tum-calendar";
+
+/// Append [`CALENDAR_ONLY`] to the configuration [`seed`] wrote.
+fn calendar_only(root: &Path) {
+    let path = root.join("config.toml");
+    let mut config = std::fs::read_to_string(&path).unwrap();
+    config.push_str(&format!(
+        "\n[[accounts]]\nname = \"{CALENDAR_ONLY}\"\ndefault_from = \"ab12cde@tum.de\"\n\
+         calendar_backend = \"ews\"\n\n[accounts.ews]\n\
+         endpoint = \"https://mail.example.com/ews/exchange.asmx\"\nusername = \"ab12cde\"\n\
+         password_from = \"imap\"\n\n[accounts.imap]\nsync_interval_secs = 1\n"
+    ));
+    std::fs::write(path, config).unwrap();
+}
+
+/// A calendar-only EWS account (no IMAP, SMTP or Graph mail) syncs its
+/// calendar on its own (PERSO-318): the daemon creates its store with no
+/// mail pass, the account turns ready instead of waiting for a `mp sync`
+/// that refuses it, and its scheduled tick syncs the calendar and announces
+/// it, all without a client asking.
+#[tokio::test]
+async fn a_calendar_only_account_syncs_its_calendar_on_its_own() {
+    let slice = Slice::start_seeded(false, &[], calendar_only, Vec::new());
+    let mut watcher = slice.connect().await;
+    call(&mut watcher, "state.bootstrap", json!({})).await;
+    let mut conn = slice.connect().await;
+
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    let announced = loop {
+        match tokio::time::timeout_at(deadline, watcher.next_notification()).await {
+            Ok(Some(notification))
+                if notification.params["kind"] == "calendar.changed"
+                    && notification.params["payload"]["account"] == CALENDAR_ONLY =>
+            {
+                break true;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break false,
+        }
+    };
+    let status = call(&mut conn, "daemon.status", json!({})).await;
+    let state = status["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["name"] == CALENDAR_ONLY)
+        .cloned();
+    assert!(
+        announced,
+        "{CALENDAR_ONLY}'s calendar never synced on its own within {SETTLE_DEADLINE:?}: \
+         daemon.status says {state:?}, and the daemon logged {:#?}",
+        daemon_log(slice.root(), CALENDAR_ONLY)
+    );
+    assert_eq!(state.expect("the account is listed")["state"], "ready");
+    let listed = call(
+        &mut conn,
+        "calendar.list",
+        json!({"account": CALENDAR_ONLY}),
+    )
+    .await;
+    let ids: Vec<&str> = listed["calendars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    // No invitation calendar: the account receives no mail to fold one from.
+    assert_eq!(ids, ["cal-main", "cal-second"], "{listed}");
+    // A mail pass would have failed for want of an IMAP host.
+    let failed = daemon_log(slice.root(), &format!("tick of {CALENDAR_ONLY} failed"));
+    assert!(failed.is_empty(), "no mail pass ran for it: {failed:#?}");
+}
+
 /// `message.invite` names the server event of an invitation mail on an
 /// account with a backend, and adds nothing on one without.
 #[tokio::test]

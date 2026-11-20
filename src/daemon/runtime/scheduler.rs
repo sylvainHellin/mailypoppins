@@ -52,9 +52,12 @@
 //!
 //! # What gets a scheduler
 //!
-//! A ready runtime with a server (IMAP or Graph) and a non-zero interval. A
-//! local-only account has no server; a blocked runtime holds no engine lock,
-//! and the engine that does is scheduling its own. A Graph account reads the
+//! A ready runtime with a server (IMAP, Graph or a calendar's alone) and a
+//! non-zero interval. A local-only account has no server; a blocked runtime
+//! holds no engine lock, and the engine that does is scheduling its own. An
+//! account whose one server is its calendar's (PERSO-318) is ticked like
+//! any other, and its tick syncs the calendar alone
+//! ([`AccountRuntime::tick`]). A Graph account reads the
 //! same `imap.sync_interval_secs`: the setting names the tick, not the
 //! transport.
 //!
@@ -128,7 +131,7 @@ pub fn spawn(
 /// The interval `runtime` is scheduled at, or `None` when it gets no
 /// scheduler (see the module docs).
 fn schedulable(runtime: &AccountRuntime, cfg: &AccountConfig) -> Option<Duration> {
-    let why_not = if cfg.is_local_only() {
+    let why_not = if cfg.is_local_only() && !cfg.syncs_only_a_calendar() {
         "has no server"
     } else if runtime.readiness() != Readiness::Ready {
         "is blocked"
@@ -569,6 +572,17 @@ mod tests {
         };
         assert!(local.is_local_only());
         assert!(spawn(&runtime, canonical(), &local).is_none());
+
+        let calendar_only = AccountConfig {
+            name: "alpha".to_string(),
+            calendar_backend: Some(crate::config::CalendarBackendKind::Ews),
+            ..Default::default()
+        };
+        assert_eq!(
+            schedulable(&runtime, &calendar_only),
+            calendar_only.imap.sync_interval(),
+            "a calendar-only account is scheduled (PERSO-318)"
+        );
 
         let graph = AccountConfig {
             name: "alpha".to_string(),

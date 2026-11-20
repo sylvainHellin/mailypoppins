@@ -716,6 +716,14 @@ impl AccountConfig {
             && self.smtp.host.trim().is_empty()
     }
 
+    /// Whether this account's one server is its calendar's (PERSO-318): no
+    /// mail source ([`Self::is_local_only`]) and a calendar backend, such as
+    /// a calendar-only EWS account. The daemon gives it a store and a
+    /// scheduled tick that syncs the calendar and runs no mail pass.
+    pub fn syncs_only_a_calendar(&self) -> bool {
+        self.is_local_only() && self.calendar_backend() != CalendarBackendKind::None
+    }
+
     /// The account's own address, lowercased, the one notion of "own
     /// address" the config has.
     ///
@@ -3086,6 +3094,34 @@ host = "imap.example.com"
             ..Default::default()
         };
         assert!(account.is_local_only());
+        assert!(!account.syncs_only_a_calendar());
+    }
+
+    /// An account with a calendar backend and no mail source syncs only its
+    /// calendar (PERSO-318); a mail account with one syncs both.
+    #[test]
+    fn a_calendar_backend_without_mail_syncs_only_a_calendar() {
+        let calendar_only = AccountConfig {
+            calendar_backend: Some(CalendarBackendKind::Ews),
+            ..Default::default()
+        };
+        assert!(calendar_only.is_local_only());
+        assert!(calendar_only.syncs_only_a_calendar());
+
+        let with_mail = AccountConfig {
+            calendar_backend: Some(CalendarBackendKind::Ews),
+            imap: ImapSettings {
+                host: "imap.example.com".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!with_mail.syncs_only_a_calendar());
+        let graph = AccountConfig {
+            auth_method: AuthMethod::Graph,
+            ..Default::default()
+        };
+        assert!(!graph.syncs_only_a_calendar());
     }
 
     /// The SMTP host is what `ImapConfig::load` falls back to, so an account
