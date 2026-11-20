@@ -29,8 +29,9 @@
 //! - the negative row would name a path under `/` or under the client's cwd
 //!   rather than under the drafts directory.
 //!
-//! Routed side only: both use `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which the
-//! pre-daemon oracle knows nothing about, so neither is a parity row.
+//! Routed side only: the default account sends over the fake SMTP and IMAP
+//! servers (PERSO-331), which the pre-daemon oracle has no account on, so
+//! none is a parity row.
 
 mod support;
 
@@ -42,6 +43,7 @@ use tempfile::TempDir;
 
 use support::parity::{mp_command, DaemonFixture, REQUIRE_ENV};
 use support::send_fixture as fixture;
+use support::wire_fixture::WireServers;
 
 /// The id of the draft these rows send, in the minted shape, and distinct from
 /// every id the fixture seeds.
@@ -62,13 +64,17 @@ const MISSING_ENTRY: &str = "nicht-da.pdf";
 /// that is neither.
 struct Slice {
     daemon: Option<DaemonFixture>,
+    /// The fake servers the default account sends over.
+    wire: WireServers,
     elsewhere: TempDir,
     tmp: TempDir,
 }
 
 impl Slice {
     /// Seed the root, add the attaching draft (and its attachment, when
-    /// `attachment` is `Some`), then start a daemon from `/` over it.
+    /// `attachment` is `Some`), move the default account onto the fake
+    /// servers, then start a daemon from `/` over it and wait for its first
+    /// drain ([`WireServers::await_startup_drain`]).
     ///
     /// In that order: the daemon loads `config.toml` once, at startup.
     fn start(entry: &str, attachment: Option<&str>) -> Slice {
@@ -85,14 +91,13 @@ impl Slice {
                 .unwrap_or_else(|e| panic!("write {}: {e}", file.display()));
         }
 
-        let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
-        let daemon = DaemonFixture::start_with(
-            tmp.path(),
-            Some(Path::new("/")),
-            &[(fixture::FAKE_TRANSPORT_ENV, &hook)],
-        );
+        let wire = WireServers::start();
+        wire.wire(tmp.path(), fixture::ACCOUNT);
+        let daemon = DaemonFixture::start_with(tmp.path(), Some(Path::new("/")), &[]);
+        wire.await_startup_drain(tmp.path(), fixture::ACCOUNT);
         Slice {
             daemon: Some(daemon),
+            wire,
             elsewhere: TempDir::new().expect("a client directory of its own"),
             tmp,
         }
@@ -125,8 +130,8 @@ impl Drop for Slice {
     }
 }
 
-/// The attaching draft: approved, one recipient the fake transport accepts,
-/// and one `attachments:` entry.
+/// The attaching draft: approved, one recipient the SMTP server accepts, and
+/// one `attachments:` entry.
 fn attaching_document(entry: &str) -> String {
     format!(
         "---\n\
@@ -173,19 +178,21 @@ fn a_relative_attachment_beside_the_draft_sends_from_any_working_directory() {
         stdout(&out)
     );
 
-    // Non-vacuous: the fake transport really served this message, so the send
-    // got past building the MIME body, which is where the attachment is read.
-    let events = fixture::transport_events(&fixture::transport_log(slice.root()));
+    // Non-vacuous: the SMTP server really took this message, so the send got
+    // past building the MIME body, which is where the attachment is read.
     assert!(
-        !events.is_empty(),
-        "the fake transport served the send rather than the send being skipped"
+        !slice
+            .wire
+            .submitted_message_ids(&fixture::SEEDED_MIDS)
+            .is_empty(),
+        "the SMTP server took the send rather than the send being skipped"
     );
 }
 
 /// An entry that is empty after trimming names no file: joined to the anchor
 /// it would be the drafts directory itself, whose every file (the draft and
 /// its siblings) a folder entry attaches. The send is refused, naming the
-/// entry, and nothing reaches the transport (PERSO-215).
+/// entry, and nothing reaches the servers (PERSO-215).
 #[test]
 fn an_empty_attachment_entry_refuses_the_send_naming_it() {
     for entry in [" ", ""] {
@@ -204,10 +211,10 @@ fn an_empty_attachment_entry_refuses_the_send_naming_it() {
             text.contains(&named),
             "the refusal names the empty entry ({named}):\n{text}"
         );
-        let events = fixture::transport_events(&fixture::transport_log(slice.root()));
         assert!(
-            events.is_empty(),
-            "nothing reached the transport for {entry:?}: {events:?}"
+            slice.wire.untouched_but_for(&fixture::SEEDED_MIDS),
+            "nothing reached the servers for {entry:?}: {:?}",
+            slice.wire.submissions()
         );
     }
 }
