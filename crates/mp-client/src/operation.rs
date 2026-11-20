@@ -22,7 +22,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-pub use mp_protocol::events::{KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS};
+pub use mp_protocol::events::{
+    KIND_DAEMON_SHUTTING_DOWN, KIND_OPERATION_FINISHED, KIND_OPERATION_PROGRESS,
+};
 
 use crate::types::{ClientError, ClientInfo, Identity, InitializeResult};
 use crate::Connection;
@@ -115,6 +117,11 @@ impl Connection {
     /// operation `id` publishes before it finishes, as `(kind, payload)`:
     /// its progress reports and what it streams, such as the hits of a
     /// `message.search_server` (`message.server_hit`).
+    ///
+    /// `daemon.shutting_down` reaches `on_event` too, though it names no
+    /// operation: it is about every operation still running, and a client that
+    /// heard it can tell the cancel or the hang-up that follows from one the
+    /// user or a crash caused.
     pub async fn await_operation_events(
         &mut self,
         id: &str,
@@ -125,6 +132,10 @@ impl Connection {
                 return Err(ClientError::Closed);
             };
             let params = notification.params;
+            if params["kind"] == KIND_DAEMON_SHUTTING_DOWN {
+                on_event(KIND_DAEMON_SHUTTING_DOWN, &params["payload"]);
+                continue;
+            }
             if params["payload"]["operation_id"].as_str() != Some(id) {
                 continue;
             }

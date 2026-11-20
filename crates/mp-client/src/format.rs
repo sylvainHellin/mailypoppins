@@ -117,6 +117,18 @@ pub fn sync_joined_line(account: &str, limit: u64) -> String {
     )
 }
 
+/// The line a sync ends with when the daemon cancelled it because it was
+/// stopping (`mp daemon stop` or `restart`, a service manager's stop), in
+/// every client: the pass stops as a cancelled one does, so what it ingested
+/// stays and the next sync goes on from there, but nobody asked for it to
+/// stop, so the line names the stop that cut it.
+pub fn sync_cut_by_shutdown_line(account: &str) -> String {
+    format!(
+        "Sync of {account} cut short by the daemon stopping: what it already ingested stays, \
+         and the next sync goes on from there"
+    )
+}
+
 /// The line a cancelled sync of an account whose one server is its
 /// calendar's ends with (PERSO-318, PERSO-321): its pass is the calendar sync
 /// alone, which has no point to stop at, so the cancel only stops the client

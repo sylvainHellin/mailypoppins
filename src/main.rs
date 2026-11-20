@@ -4128,6 +4128,10 @@ enum Synced {
     /// The pass was cancelled without this run's `^C`: from another client,
     /// or by the cancel of a pass that joined the same tick (PERSO-321).
     Cancelled,
+    /// The daemon announced its stop before the pass ended, and the pass
+    /// then ended cancelled, failed or with the connection: cut short, and a
+    /// failure, since nobody asked for it to stop. The command has said so.
+    CutByShutdown,
 }
 
 /// The exit code of a run a `^C` stopped, the shell's 128 + SIGINT.
@@ -4370,6 +4374,12 @@ async fn sync_accounts(
             // joined the same tick: attempted, not failed, and no moment to
             // start deleting cached blobs either.
             Synced::Cancelled => end.attempted += 1,
+            // The daemon is gone for every account after this one too.
+            Synced::CutByShutdown => {
+                end.attempted += 1;
+                end.failed.push(account_config.name.clone());
+                break;
+            }
             Synced::Ran => {
                 end.attempted += 1;
                 // The retention sweep rides on every real sync (#0060): a
@@ -4396,7 +4406,9 @@ async fn sync_accounts(
 /// `sync.quick` with `-n` as its bound, which has a default, or `sync.full`
 /// for `--full`, the pass the TUI's `sS` and the desktop app's full sync start.
 ///
-/// A `^C` while the pass is followed cancels it ([`cancel_pass`]).
+/// A `^C` while the pass is followed cancels it ([`cancel_pass`]). A pass the
+/// daemon's stop cut short ends on a line that says so, without asking the
+/// stopping daemon anything more ([`Synced::CutByShutdown`]).
 async fn sync_one_routed(
     connection: &mut mp_client::Connection,
     account: &AccountConfig,
@@ -4438,11 +4450,28 @@ async fn sync_one_routed(
     };
 
     let id = wire_str(&started["operation_id"]).to_string();
-    let settled = tokio::select! {
-        settled = await_operation(connection, &id, |payload| say_drain_line(say, payload)) => settled,
+    let mut stopping = false;
+    let followed = tokio::select! {
+        followed = connection.await_operation_events(&id, |kind, payload| match kind {
+            mp_client::operation::KIND_DAEMON_SHUTTING_DOWN => stopping = true,
+            mp_client::operation::KIND_OPERATION_PROGRESS => say_drain_line(say, payload),
+            _ => {}
+        }) => followed,
         () = interrupts.next() => {
             return cancel_pass(connection, account, &id, run.dry_run, interrupts, say).await
         }
+    };
+    let settled = match followed {
+        Ok(Settled::Done(result)) => Settled::Done(result),
+        Ok(_) | Err(_) if stopping => {
+            say.err(&format!(
+                "\u{26a0} {}",
+                mp_client::format::sync_cut_by_shutdown_line(&account.name)
+            ));
+            return Synced::CutByShutdown;
+        }
+        Ok(settled) => settled,
+        Err(_) => daemon_went_away("the connection closed with an operation still running"),
     };
     let ended = pass_end(connection, &id, settled).await;
     say_settled_pass(say, account, run.dry_run, ended)
