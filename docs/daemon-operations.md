@@ -50,6 +50,10 @@ A stop the grace did not cover names what it cut short, one line each, under a w
 Either way the exit code is **0**: the daemon stopped, which is what was asked.
 A nonzero code would make `mp daemon restart` refuse to start the replacement, and would turn "a sync was still running" into a failure of the command that succeeded.
 
+The sync a stop cut short is the one that fails: every client hears `daemon.shutting_down` before the grace starts, so a pass of its own that then ends cancelled, failed or with the connection ends on "Sync of <account> cut short by the daemon stopping: what it already ingested stays, and the next sync goes on from there" (`mp_client::format::sync_cut_by_shutdown_line`), in `mp sync`, the TUI and the desktop alike.
+`mp sync` prints it on stderr, asks the stopping daemon nothing more, syncs no account after it and exits 1.
+A pass that joined a tick already running is a live operation like any other, so the stop counts and names it; one that already settled when the stop came is not live, and its client prints the outcome it settled with.
+
 When the socket answered a moment ago but the `daemon.stop` call does not, the daemon is wedged rather than absent, so the command falls back to `SIGTERM` on the pid in `daemon.json`; that path prints the clean line, because nothing told it otherwise.
 With nothing running it exits 0, and it sweeps a stale socket on the way out, because a stop is exactly when a user expects that tidying.
 
