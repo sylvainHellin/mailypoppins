@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use ts_rs::{Config, TS};
 
 use crate::{
-    attachments, calendar, commands, configuration, connector, contacts, editor, error, reminders,
-    session, settings, signatures, terminal, updates,
+    agent, attachments, calendar, commands, configuration, connector, contacts, editor, error,
+    reminders, session, settings, signatures, terminal, updates,
 };
 
 /// Exports each listed type, and its dependencies, into `$cfg`'s directory.
