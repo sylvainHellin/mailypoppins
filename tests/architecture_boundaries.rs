@@ -36,6 +36,14 @@
 //! mechanism as the import allow-list and it is a record in the same sense: a
 //! row that goes away is struck in the commit that removes the call.
 //!
+//! **The selector of one stored row.** A row whose mailbox holds a second copy
+//! of its Message-ID is named with its UID (PERSO-244), and an answer that
+//! hands back the bare `Selector::for_message` instead hands the caller a
+//! selector that names both copies (PERSO-340). The last half finds every call
+//! of it in the workspace, tests included, by file and enclosing function, and
+//! compares the result against [`FOR_MESSAGE_SITES`], whose third column is the
+//! reason each one may stay bare.
+//!
 //! Nothing here is feature-gated: it passes on the pre-daemon tree, which is
 //! the point. `engine_imports` takes the client source root as an argument,
 //! which is what let P5-U10f re-point it at `clients/tui/src` without a
@@ -1221,6 +1229,304 @@ fn strip_test_modules_removes_the_block_and_nothing_else() {
 
 /// The spellings a call into the terminal client takes from the root crate.
 const TUI_CRATE_PATHS: [&str; 3] = ["crate::tui::", "mailypoppins::tui::", "mp_tui::"];
+
+// ---------------------------------------------------------------------------
+// The selector of one stored row (PERSO-340)
+// ---------------------------------------------------------------------------
+
+/// The trees the scan for `Selector::for_message` walks, relative to the repo
+/// root: the engine, the shared crates, every client and the integration
+/// tests. A build tree and a `node_modules` under them are skipped.
+const FOR_MESSAGE_ROOTS: [&str; 4] = ["src", "crates", "clients", "tests"];
+
+/// Every call of `Selector::for_message` the workspace may keep, with the
+/// reason it may: `(file from the repo root, enclosing fn, reason)`, sorted.
+///
+/// The bare selector names every copy of a Message-ID in its mailbox, so an
+/// answer that names one stored row takes `selector::of_row` (or
+/// `Selector::for_listed` with the listing's twins) instead. What may stay is
+/// the selector module itself, a fallback when the twins probe has failed, and
+/// a test's input or oracle over rows that have no twin. A new call belongs on
+/// `of_row`, or here with its reason; a call that went away is struck in the
+/// same commit.
+const FOR_MESSAGE_SITES: [(&str, &str, &str); 17] = [
+    (
+        "crates/mp-core/src/selector.rs",
+        "for_listed",
+        "the selector module itself: the bare selector that for_listed narrows to the UID \
+         beside a twin",
+    ),
+    (
+        "src/calendar_view.rs",
+        "imip_events",
+        "fallback after a failed twins probe, so the event still names its invitation mail",
+    ),
+    (
+        "src/daemon/hooks/mod.rs",
+        "payload",
+        "fallback after a failed twins probe, so the hook still runs with a selector",
+    ),
+    (
+        "src/daemon/methods/draft.rs",
+        "sent_copy",
+        "fallback after a failed twins probe, so the refusal still names the sent copy",
+    ),
+    (
+        "src/daemon/methods/message.rs",
+        "legacy_row",
+        "test oracle: the json! literal WireRow replaced, compared over rows with no twin",
+    ),
+    (
+        "src/daemon/methods/message_server.rs",
+        "restore",
+        "fallback after a failed twins probe, so the restored row is still logged by selector",
+    ),
+    (
+        "src/read_cmd.rs",
+        "shown_message",
+        "fallback after a failed twins probe, so mp show still prints a selector",
+    ),
+    (
+        "src/read_cmd.rs",
+        "the_listing_names_every_row_by_selector_and_reports_the_truncation",
+        "test input and expectation: the renderer prints the selector it is handed, over \
+         rows with no twin",
+    ),
+    (
+        "src/read_cmd.rs",
+        "the_search_listing_is_ranked_selectors_and_optional_bodies",
+        "test input and expectation: the renderer prints the selector it is handed, over \
+         rows with no twin",
+    ),
+    (
+        "src/selector.rs",
+        "resolve_received",
+        "the selector module itself: the ambiguity refusal's candidates, to which ambiguous() \
+         appends each twin's UID",
+    ),
+    (
+        "src/tui_tests/oracle.rs",
+        "row_to_wire",
+        "test oracle of message.list's row over the fixture mailboxes, none of which holds a \
+         twin",
+    ),
+    (
+        "tests/daemon_read_only_methods.rs",
+        "expected_message",
+        "test oracle of message.get over fixture rows with no twin",
+    ),
+    (
+        "tests/daemon_send_slice.rs",
+        "a_sent_copy_beside_a_second_one_is_named_by_its_own_uid",
+        "test expectation: the bare selector, narrowed by hand to the sent copy's UID",
+    ),
+    (
+        "tests/daemon_server_leg_slice.rs",
+        "fetching_a_message_the_store_already_holds_is_idempotent",
+        "test oracle of message.fetch's held row, a fixture row with no twin",
+    ),
+    (
+        "tests/daemon_thread_slice.rs",
+        "the_row_carries_every_field_the_overlay_renders",
+        "test oracle of message.thread's member rows, fixture rows with no twin",
+    ),
+    (
+        "tests/daemon_wire_rows.rs",
+        "every_listed_row_carries_the_selector_the_cli_would_print",
+        "test oracle of message.list's rows, fixture rows with no twin",
+    ),
+    (
+        "tests/daemon_wire_rows.rs",
+        "the_wire_row_carries_every_field_a_list_entry_is_built_from",
+        "test oracle of the list entry a wire row builds, a fixture row with no twin",
+    ),
+];
+
+/// Every `(file, enclosing fn)` under `roots` of `root` that calls
+/// `Selector::for_message` (or `Self::for_message` inside its impl).
+///
+/// Tests are scanned too: an oracle that spells a row bare is a reason to
+/// write down, since it agrees with production only while its fixture holds
+/// no twin. Comment lines are dropped, so a doc link to the function is not a
+/// call; the enclosing fn is the last `fn` declared before the call, which is
+/// the function a closure or a block inside it belongs to. This file is not
+/// scanned: the scanner's own test spells calls in string literals.
+fn for_message_sites(root: &Path, roots: &[&str]) -> BTreeSet<(String, String)> {
+    let mut found = BTreeSet::new();
+    for entry in roots {
+        let mut stack = vec![root.join(entry)];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for path in entries.map(|entry| entry.expect("dir entry").path()) {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_dir() {
+                    if !matches!(name, "target" | "node_modules") && !name.starts_with('.') {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") || relative(root, &path) == file!() {
+                    continue;
+                }
+                let source =
+                    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+                for function in for_message_callers(&source) {
+                    found.insert((relative(root, &path), function));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The function each `Selector::for_message(` / `Self::for_message(` call in
+/// `source` sits in, comment lines aside.
+fn for_message_callers(source: &str) -> Vec<String> {
+    let code = source
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("//") {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = code[from..].find("::for_message(") {
+        let at = from + at;
+        from = at + 1;
+        let owner: String = code[..at]
+            .chars()
+            .rev()
+            .take_while(|c| is_ident_char(*c))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if owner != "Selector" && owner != "Self" {
+            continue;
+        }
+        out.push(enclosing_fn(&code[..at]).unwrap_or_else(|| "<no fn>".to_string()));
+    }
+    out
+}
+
+/// The name of the last `fn` declared in `before`.
+fn enclosing_fn(before: &str) -> Option<String> {
+    let bytes = before.as_bytes();
+    let mut end = before.len();
+    while let Some(at) = before[..end].rfind("fn ") {
+        end = at;
+        if at > 0 && is_ident_byte(bytes[at - 1]) {
+            continue;
+        }
+        if let Some(name) = leading_ident(&before[at + 3..]) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// The gate: every call of `Selector::for_message` is one
+/// [`FOR_MESSAGE_SITES`] names, and every site it names still calls it.
+#[test]
+fn selector_for_message_is_called_only_where_the_allow_list_says_why() {
+    let actual = for_message_sites(&repo_root(), &FOR_MESSAGE_ROOTS);
+    let expected: BTreeSet<(String, String)> = FOR_MESSAGE_SITES
+        .iter()
+        .map(|(file, function, _)| (file.to_string(), function.to_string()))
+        .collect();
+    let added: Vec<_> = actual.difference(&expected).collect();
+    let removed: Vec<_> = expected.difference(&actual).collect();
+    if added.is_empty() && removed.is_empty() {
+        return;
+    }
+    let mut report = String::new();
+    for (file, function) in &added {
+        report.push_str(&format!(
+            "  new bare selector: {file} calls Selector::for_message in `{function}`\n"
+        ));
+    }
+    for (file, function) in &removed {
+        report.push_str(&format!(
+            "  bare selector gone: {file} no longer calls Selector::for_message in `{function}`\n"
+        ));
+    }
+    panic!(
+        "the calls of Selector::for_message moved ({} in the tree, {} in FOR_MESSAGE_SITES):\n\
+         {report}\n\
+         The bare selector names every copy of a Message-ID in its mailbox (PERSO-340): an \
+         answer that names one stored row takes selector::of_row, and a call that has to stay \
+         bare goes into FOR_MESSAGE_SITES with its reason; a call that went away is struck \
+         from it in the same commit.",
+        actual.len(),
+        expected.len(),
+    );
+}
+
+/// The allow-list names real files, gives every site a reason, and is sorted.
+#[test]
+fn every_for_message_site_names_a_file_and_a_reason() {
+    let root = repo_root();
+    let mut previous: Option<(&str, &str)> = None;
+    for (file, function, reason) in FOR_MESSAGE_SITES {
+        assert!(
+            root.join(file).is_file(),
+            "FOR_MESSAGE_SITES names {file}, which does not exist"
+        );
+        assert!(
+            reason.len() > 20,
+            "FOR_MESSAGE_SITES's entry for {file} `{function}` has no usable reason: {reason:?}"
+        );
+        if let Some(previous) = previous {
+            assert!(
+                previous < (file, function),
+                "FOR_MESSAGE_SITES is not sorted: {previous:?} precedes {:?}",
+                (file, function)
+            );
+        }
+        previous = Some((file, function));
+    }
+}
+
+/// The scanner reads a call by its enclosing fn, through a closure and inside
+/// an impl, and ignores a comment, a method of another type that shares the
+/// name, a function whose name ends in it, and a build tree.
+#[test]
+fn the_for_message_scanner_names_the_enclosing_fn_and_ignores_lookalikes() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("src/target")).expect("mkdir");
+    fs::write(
+        root.join("src/lib.rs"),
+        "fn answer(row: &Row) -> String {\n\
+         \x20   let name = |r: &Row| crate::selector::Selector::for_message(\"a\", r);\n\
+         \x20   name(row).to_string()\n}\n\
+         /// [`Selector::for_message`] and Selector::for_message(a, b) in a doc comment\n\
+         // Selector::for_message(a, b) in a line comment\n\
+         fn lookalikes(budget: &Budget) {\n\
+         \x20   budget.for_message(3);\n\
+         \x20   crate::reconcile::event_for_message(1);\n}\n\
+         impl Selector {\n    fn listed(row: &Row) -> Self {\n        Self::for_message(\"a\", row)\n    }\n}\n",
+    )
+    .expect("write");
+    fs::write(
+        root.join("src/target/built.rs"),
+        "fn built() { Selector::for_message(\"a\", r); }\n",
+    )
+    .expect("write");
+    let found = for_message_sites(root, &["src"]);
+    let expected: BTreeSet<(String, String)> = [("src/lib.rs", "answer"), ("src/lib.rs", "listed")]
+        .into_iter()
+        .map(|(f, n)| (f.to_string(), n.to_string()))
+        .collect();
+    assert_eq!(found, expected);
+}
 
 /// The daemon's production code calls into no client (PERSO-225): the arrow
 /// points from a client to the server, and the pure helpers both need live in
