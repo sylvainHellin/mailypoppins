@@ -104,6 +104,54 @@ describe("the Settings view", () => {
     expect(within(group).getByRole("button", { name: "Follow the app" })).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("the terminal font is the app's until set, and a family and a size round-trip through desktop.json into the model", async () => {
+    const { user, probe, view } = await openSettings();
+    const form = within(view).getByRole("form", { name: "Terminal font" });
+    const family = within(form).getByLabelText("Terminal font family");
+    const size = within(form).getByLabelText("Terminal font size");
+    expect(family).toHaveValue("");
+    expect(size).toHaveValue("");
+    expect(probe.state.terminalFont).toEqual({ family: null, size: null });
+    await user.type(family, "JetBrainsMono Nerd Font Mono");
+    await user.type(size, "16");
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(probe.state.terminalFont).toEqual({ family: "JetBrainsMono Nerd Font Mono", size: 16 }));
+    expect(mock.settings.get("terminal_font_family")).toBe("JetBrainsMono Nerd Font Mono");
+    expect(mock.settings.get("terminal_font_size")).toBe("16");
+    await user.clear(family);
+    await user.clear(size);
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(probe.state.terminalFont).toEqual({ family: null, size: null }));
+    expect(mock.settings.has("terminal_font_family")).toBe(false);
+    expect(mock.settings.has("terminal_font_size")).toBe(false);
+  });
+
+  it("a stored terminal font shows on open and reaches the model at startup", async () => {
+    resetMock();
+    mock.settings.set("terminal_font_family", "Iosevka Term");
+    mock.settings.set("terminal_font_size", "13.5");
+    const { probe, view } = await openSettingsKeeping();
+    const form = within(view).getByRole("form", { name: "Terminal font" });
+    await waitFor(() => expect(within(form).getByLabelText("Terminal font family")).toHaveValue("Iosevka Term"));
+    expect(within(form).getByLabelText("Terminal font size")).toHaveValue("13.5");
+    expect(probe.state.terminalFont).toEqual({ family: "Iosevka Term", size: 13.5 });
+  });
+
+  it("a terminal font the rules refuse says why and writes neither key", async () => {
+    const { user, probe, view } = await openSettings();
+    const form = within(view).getByRole("form", { name: "Terminal font" });
+    await user.type(within(form).getByLabelText("Terminal font family"), "Fira Code");
+    await user.type(within(form).getByLabelText("Terminal font size"), "64");
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    expect(await within(form).findByRole("alert")).toHaveTextContent(/from 8 to 32/);
+    await user.clear(within(form).getByLabelText("Terminal font size"));
+    await user.type(within(form).getByLabelText("Terminal font family"), ", serif");
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(form).getByRole("alert")).toHaveTextContent(/letters, digits, spaces/));
+    expect(callsOf("setting_set").filter((a) => String((a as { key?: string }).key).startsWith("terminal_font"))).toEqual([]);
+    expect(probe.state.terminalFont).toEqual({ family: null, size: null });
+  });
+
   it("an account naming the retired Microsoft OAuth2 over IMAP says how to switch and offers no sign-in", async () => {
     resetMock();
     mock.config.accounts.push({ ...mock.config.accounts[0], name: "office", auth_method: "oauth2", oauth2: null });

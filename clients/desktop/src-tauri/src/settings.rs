@@ -285,7 +285,9 @@ mod tests {
             match get_on(&file, key) {
                 Err(GuiError::NotFound { message, .. }) => {
                     assert!(
-                        message.contains("editor, theme, reader_mode, editor_colors"),
+                        message.contains(
+                            "editor, theme, reader_mode, editor_colors, terminal_font_family, terminal_font_size"
+                        ),
                         "{message}"
                     )
                 }
@@ -377,6 +379,79 @@ mod tests {
         assert_eq!(file_json(&file), json!({"editor": "nvim"}));
         std::fs::write(&file, "[1]").expect("write");
         assert_eq!(editor_colors(&file), EditorColors::App, "a broken file");
+    }
+
+    #[test]
+    fn the_terminal_font_round_trips_and_refuses_what_could_break_the_stack() {
+        let dir = crate::test_support::scratch_dir("settings-terminal-font");
+        let file = settings_path(&dir);
+        for key in ["terminal_font_family", "terminal_font_size"] {
+            assert_eq!(get_on(&file, key).expect("unset"), None);
+        }
+        for family in [
+            "JetBrainsMono Nerd Font Mono",
+            "M+ 1m",
+            "Source_Code-Pro.v2",
+            "ヒラギノ角ゴシック",
+        ] {
+            assert_eq!(
+                set_on(&file, "terminal_font_family", Some(&format!(" {family} ")))
+                    .expect("family")
+                    .as_deref(),
+                Some(family)
+            );
+        }
+        let long = "a".repeat(TERMINAL_FONT_FAMILY_MAX + 1);
+        for bad in [
+            "Fira Code\", serif",
+            "Fira Code, monospace",
+            "Fira 'Code'",
+            "Fira\\Code",
+            "Fira; color: red",
+            "Fira { }",
+            "Fira\nCode",
+            "Fira (Code)",
+            long.as_str(),
+        ] {
+            match set_on(&file, "terminal_font_family", Some(bad)) {
+                Err(GuiError::Setup { message }) => {
+                    assert!(message.contains("letters, digits, spaces"), "{message}")
+                }
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
+        for (size, stored) in [("16", "16"), (" 8 ", "8"), ("32", "32"), ("13.5", "13.5")] {
+            assert_eq!(
+                set_on(&file, "terminal_font_size", Some(size))
+                    .expect("size")
+                    .as_deref(),
+                Some(stored)
+            );
+        }
+        for bad in [
+            "7", "32.5", "33", "0", "-12", "+12", "1e1", "inf", "NaN", "12px", "12.25", ".5",
+            "12.", "016",
+        ] {
+            match set_on(&file, "terminal_font_size", Some(bad)) {
+                Err(GuiError::Setup { message }) => {
+                    assert!(message.contains("from 8 to 32"), "{message}")
+                }
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            file_json(&file),
+            json!({"terminal_font_family": "ヒラギノ角ゴシック", "terminal_font_size": "13.5"})
+        );
+        assert_eq!(
+            set_on(&file, "terminal_font_family", Some("  ")).expect("blank"),
+            None
+        );
+        assert_eq!(
+            set_on(&file, "terminal_font_size", None).expect("clear"),
+            None
+        );
+        assert_eq!(file_json(&file), json!({}));
     }
 
     #[test]

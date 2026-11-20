@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { closeNote, mock } from "@/test/tauri-mock";
 import { GUI_ENTRIES, paletteEntries } from "@/keymap/catalog";
+import { terms } from "@/test/xterm-fake";
 
 vi.mock("@xterm/xterm", () => import("@/test/xterm-fake"));
 vi.mock("@xterm/addon-fit", () => import("@/test/xterm-fake"));
@@ -148,8 +149,8 @@ describe("noted mail in the list and the reader", () => {
 });
 
 describe("the notes list and the hand-off", () => {
-  async function withNotes() {
-    const ctx = await onFirstRow();
+  async function withNotes(before?: () => void) {
+    const ctx = await onFirstRow(before);
     await prompt(ctx.user);
     await ctx.user.keyboard("s");
     await waitFor(() => expect(mock.notes.notes).toHaveLength(1));
@@ -258,6 +259,17 @@ describe("the notes list and the hand-off", () => {
     await user.click(within(again).getByRole("button", { name: "Close the agent panel" }));
     await waitFor(() => expect(screen.queryByRole("complementary", { name: "Agent" })).toBeNull());
     expect(mock.terminal.of("kill").map((k) => k.session)).toContain(1);
+  });
+
+  it("the agent's terminal draws in the terminal font stored in desktop.json", async () => {
+    const { user } = await withNotes(() => {
+      mock.settings.set("terminal_font_family", "JetBrainsMono Nerd Font Mono");
+      mock.settings.set("terminal_font_size", "16");
+    });
+    await user.keyboard("x");
+    await screen.findByRole("complementary", { name: "Agent" });
+    await waitFor(() => expect(terms.at(-1)?.options).toMatchObject({ fontSize: 16 }));
+    expect(terms.at(-1)?.options.fontFamily).toMatch(/^"JetBrainsMono Nerd Font Mono", .+, "Symbols Nerd Font Mono"$/);
   });
 
   it("an agent that does not start leaves the notes open and says why", async () => {

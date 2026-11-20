@@ -127,6 +127,18 @@ describe("the route", () => {
     expect(within(reader()).queryByRole("article")).toBeNull();
   });
 
+  it("draws the editor in the terminal font stored in desktop.json", async () => {
+    const { user } = renderApp(1400, () => {
+      nvim();
+      mock.settings.set("terminal_font_family", "JetBrainsMono Nerd Font Mono");
+      mock.settings.set("terminal_font_size", "16");
+    });
+    await shellReady();
+    await replyEmbedded(user);
+    await waitFor(() => expect(terms.at(-1)?.options).toMatchObject({ fontSize: 16 }));
+    expect(terms.at(-1)?.options.fontFamily).toMatch(/^"JetBrainsMono Nerd Font Mono", .+, "Symbols Nerd Font Mono"$/);
+  });
+
   it("follows the setting: a GUI editor keeps editor_open, a terminal editor's full path spawns", async () => {
     const { user } = renderApp(1400, () => mock.settings.set("editor", "zed {path}"));
     await shellReady();

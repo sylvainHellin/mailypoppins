@@ -358,6 +358,56 @@ describe("the terminal pane", () => {
     expect(term.options.fontFamily).toBe(`${host}, "Symbols Nerd Font Mono"`);
   });
 
+  it("keeps the app's mono font at the host's size while no terminal font is set", async () => {
+    const m = mount({ font: { family: null, size: null } });
+    const term = await started(m);
+    const style = getComputedStyle(term.element as HTMLElement);
+    const size = Number.parseFloat(style.fontSize);
+    expect(term.options.fontFamily).toBe(`${style.fontFamily}, "Symbols Nerd Font Mono"`);
+    expect(term.options.fontSize).toBe(Number.isFinite(size) && size > 0 ? size : 14);
+    const bare = mount();
+    await waitFor(() => expect(bare.onStarted).toHaveBeenCalledTimes(1));
+    expect(xt.state.terms[1].options).toMatchObject({ fontFamily: term.options.fontFamily, fontSize: term.options.fontSize });
+  });
+
+  it("draws in a chosen family and size, the app's mono font and the symbols after it", async () => {
+    const fonts = fakeFonts();
+    const m = mount({ font: { family: "JetBrainsMono Nerd Font Mono", size: 16 } });
+    const term = await started(m);
+    const host = getComputedStyle(term.element as HTMLElement).fontFamily;
+    expect(term.options.fontFamily).toBe(`"JetBrainsMono Nerd Font Mono", ${host}, "Symbols Nerd Font Mono"`);
+    expect(term.options.fontSize).toBe(16);
+    expect(fonts.load.mock.calls[0][0]).toBe('16px "Symbols Nerd Font Mono"');
+  });
+
+  it("takes a changed font at once: refits, tells the session its new size and redraws the symbols at it", async () => {
+    const fonts = fakeFonts();
+    const m = mount();
+    const term = await started(m);
+    fonts.resolve();
+    await waitFor(() => expect(term.atlasCleared).toBe(1));
+    const host = getComputedStyle(term.element as HTMLElement).fontFamily;
+    // A larger font fits fewer cells in the same pane.
+    xt.state.size = { cols: 88, rows: 26 };
+    m.rerender({ font: { family: "JetBrainsMono Nerd Font Mono", size: 16 } });
+    expect(term.options.fontFamily).toBe(`"JetBrainsMono Nerd Font Mono", ${host}, "Symbols Nerd Font Mono"`);
+    expect(term.options.fontSize).toBe(16);
+    expect(m.bridge.of("resize")).toEqual([{ cmd: "resize", session: 1, cols: 88, rows: 26 }]);
+    expect(xt.state.terms).toHaveLength(1);
+    expect(fonts.load).toHaveBeenCalledTimes(2);
+    expect(fonts.load.mock.calls[1][0]).toBe('16px "Symbols Nerd Font Mono"');
+    fonts.resolve();
+    await waitFor(() => expect(term.atlasCleared).toBe(2));
+    expect(term.redraws.at(-1)).toEqual({ start: 0, end: 25 });
+    // Clearing the setting goes back to the app's font, and the same props change nothing.
+    xt.state.size = { cols: 100, rows: 30 };
+    m.rerender({ font: { family: null, size: null } });
+    expect(term.options.fontFamily).toBe(`${host}, "Symbols Nerd Font Mono"`);
+    expect(m.bridge.of("resize")).toHaveLength(2);
+    m.rerender({ font: { family: null, size: null } });
+    expect(fonts.load).toHaveBeenCalledTimes(3);
+  });
+
   it("loads the symbols font without holding the spawn, and redraws its glyphs once it arrives", async () => {
     const fonts = fakeFonts();
     const m = mount();
