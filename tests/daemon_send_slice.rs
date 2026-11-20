@@ -2875,6 +2875,62 @@ async fn a_sent_draft_whose_copy_is_stored_names_the_copy_mp_show_reads() {
     );
 }
 
+/// PERSO-340: a Sent folder that holds a second copy of the message that went
+/// out names the sent copy by its own selector, UID included, so `mp show`
+/// reads it; the bare selector names both copies and is refused as ambiguous.
+///
+/// Routed side only (fake servers, APPEND acknowledged).
+#[tokio::test]
+async fn a_sent_copy_beside_a_second_one_is_named_by_its_own_uid() {
+    let slice = Slice::wired(|_| {});
+    let (selector, record) = send_the_approved_draft(&slice);
+    let message_id = frontmatter_value(&record, "message_id");
+    let store = fixture::store(slice.root(), fixture::ACCOUNT);
+    let copy = mailypoppins::store::read::find_by_message_id(&store, fixture::ACCOUNT, &message_id)
+        .expect("the store answers a Message-ID lookup")
+        .into_iter()
+        .find(|row| row.mailbox == "sent")
+        .expect("the send ingested its copy into the store's sent mailbox");
+    support::read_fixture::ingest_copy_of(
+        slice.root(),
+        fixture::ACCOUNT,
+        "sent",
+        copy.uid + 100,
+        &copy.message_id,
+    );
+    let expected = format!(
+        "{}/{}",
+        mailypoppins::selector::Selector::for_message(fixture::ACCOUNT, &copy),
+        copy.uid
+    );
+
+    let out = slice.routed(&["path", &selector]);
+    let err = stderr(&out);
+    assert!(
+        err.contains(&format!(
+            "; its sent copy is {expected}, which `mp show` reads"
+        )),
+        "the refusal names the sent copy by its own selector, {expected}:\n{err}"
+    );
+    let shown = slice.routed(&["show", &expected]);
+    assert_eq!(
+        shown.status.code(),
+        Some(0),
+        "`mp show {expected}` reads the sent copy:\nstdout: {}\nstderr: {}",
+        stdout(&shown),
+        stderr(&shown)
+    );
+
+    let mut conn = slice.connect().await;
+    let refused = call_err(
+        &mut conn,
+        "draft.path",
+        json!({"account": fixture::ACCOUNT, "selector": selector}),
+    )
+    .await;
+    assert_eq!(data_of(&refused)["sent_copy"], json!(expected));
+}
+
 /// PERSO-317, the copy not found: a send whose APPEND the server refused has
 /// delivered every recipient, so the draft is retired as sent, but its outbox
 /// row waits on the APPEND and the store holds no sent copy yet. The refusal

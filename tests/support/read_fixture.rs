@@ -290,6 +290,34 @@ pub fn email(from: &str, to: &str, subject: &str, date: &str, body: &str) -> Fet
     }
 }
 
+/// A second copy of `message_id` in `account`'s `mailbox` under `root`, at
+/// `uid`, as a server holding the message twice in one folder gives the store
+/// (PERSO-239). Ingest would rebind a second UID of a Message-ID onto the
+/// first row, so the copy is ingested under an id of its own and renamed to
+/// the shared one.
+pub fn ingest_copy_of(root: &Path, account: &str, mailbox: &str, uid: i64, message_id: &str) {
+    let mut copy = email(
+        "copy@example.com",
+        "sylvain@example.com",
+        "A second copy",
+        "Sat, 27 Jun 2026 06:00:00 +0000",
+        "one message, two copies in one mailbox\n",
+    );
+    copy.message_id = Some(format!("<copy-{uid}@example.com>"));
+    ingest(root, account, mailbox, uid, &copy);
+    let renamed = store(root, account)
+        .conn()
+        .execute(
+            "UPDATE messages SET message_id = ?1 WHERE account = ?2 AND mailbox = ?3 AND uid = ?4",
+            rusqlite::params![message_id, account, mailbox, uid],
+        )
+        .expect("rename the second copy");
+    assert_eq!(
+        renamed, 1,
+        "the second copy is the one row at {mailbox}/{uid}"
+    );
+}
+
 /// Ingest one message into `account`'s store under `root`.
 pub fn ingest(root: &Path, account: &str, mailbox: &str, uid: i64, message: &FetchedEmail) {
     let dir = account_dir(root, account);

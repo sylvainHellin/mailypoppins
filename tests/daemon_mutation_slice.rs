@@ -1848,7 +1848,7 @@ fn twin_a_selector_naming_an_unconfigured_account_fails_with_that_account_named(
 
 mod wire {
     use super::support::wire_fixture::{
-        assert_ok, mail, stderr, stdout, WireRoot, ARCHIVE, INBOX, SENT, TRASH,
+        assert_ok, mail, stderr, stdout, wait_for, WireRoot, ARCHIVE, INBOX, SENT, TRASH,
     };
 
     /// Every op the store still owes the server: `(kind, state)`.
@@ -2160,6 +2160,36 @@ mod wire {
             both,
             "both copies, each under its own UID"
         );
+    }
+
+    /// PERSO-340: the log line of a copy restored beside its twin names the
+    /// copy by its own selector, UID included, which is the one a user pastes
+    /// to act on it again; the bare selector names both copies.
+    #[test]
+    fn a_twin_restored_after_a_refused_delete_is_logged_by_its_own_selector() {
+        let mut wire = WireRoot::new();
+        let twin = mail("twin", "ada@example.org", "Twice", "the same");
+        wire.imap
+            .set_mail(INBOX, 11, vec![(1, twin.clone()), (2, twin)]);
+        wire.start(&[]);
+        wire.sync();
+
+        wire.imap
+            .refuse("STORE", Some("NO [CANNOT] Mailbox is locked"));
+        let out = wire.mp(&["delete", "mp://wire/inbox/twin@example.org/2"]);
+        assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+
+        let restored =
+            "[mutation] mp://wire/inbox/twin@example.org/2 is back in the store from the server";
+        let logs = wire.root().join("logs");
+        wait_for("the restore's log line", || {
+            std::fs::read_dir(&logs)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|file| std::fs::read_to_string(file.path()).ok())
+                .any(|text| text.lines().any(|line| line.ends_with(restored)))
+        });
     }
 
     /// The UID the store holds for the deleted row now holds another

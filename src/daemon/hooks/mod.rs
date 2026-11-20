@@ -662,6 +662,22 @@ mod tests {
             .unwrap();
         }
 
+        /// A second copy of `raw` beside the inbox's: one Message-ID, two rows.
+        fn arrive_twin(&self, uid: i64, raw: &[u8]) {
+            let email = crate::parse::parse_rfc822_to_fetched_email(raw).unwrap();
+            ingest::ingest_twin(
+                &self.store,
+                &self.blobs,
+                &IngestInput {
+                    account: ACCOUNT,
+                    mailbox: "inbox",
+                    uid,
+                    email: &email,
+                    raw: Some(raw),
+                },
+            );
+        }
+
         fn cursor(&self, uidvalidity: i64, last_uid: i64, arrival_mark: Option<i64>) {
             ingest::record_mailbox_cursor(
                 &self.store,
@@ -884,6 +900,34 @@ mod tests {
             .unwrap();
         assert_eq!(run.outcome, "exit 0");
         assert_eq!(run.message_id, "<run@hellin.me>");
+    }
+
+    /// PERSO-340: a mailbox holding two copies of one Message-ID hands each
+    /// copy's run the selector of that copy, UID included, on stdin, in
+    /// `message.json` and in `MP_HOOK_SELECTOR`; the bare selector names both
+    /// and a command that addresses the message by it is refused as ambiguous.
+    #[test]
+    fn the_payload_names_its_own_copy_when_the_mailbox_holds_a_twin() {
+        let fx = fixture(vec![hook("pi", vec!["true".into()])]);
+        let mail = raw("sylvain@hellin.me", "twice", true);
+        fx.arrive(1, &mail);
+        fx.arrive_twin(2, &mail);
+        let hook = &fx.account.hooks[0];
+        for uid in [1, 2] {
+            let expected = format!("mp://{ACCOUNT}/inbox/twice@hellin.me/{uid}");
+            let row_id = read::find_row_by_uid(&fx.store, ACCOUNT, "inbox", uid)
+                .unwrap()
+                .unwrap();
+            let row = read::find_by_id(&fx.store, row_id).unwrap().unwrap();
+            let described = describe(&fx.store, &fx.blobs, ACCOUNT, hook, &row, false).unwrap();
+            assert_eq!(described["payload"]["selector"], expected, "{described}");
+
+            let prepared = prepare(&fx.store, &fx.blobs, ACCOUNT, hook, row_id, false).unwrap();
+            let dir = prepared.dir.clone();
+            assert_eq!(prepared.selector, expected);
+            assert_eq!(prepared.payload["selector"], expected);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

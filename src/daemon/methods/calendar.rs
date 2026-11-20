@@ -3024,6 +3024,44 @@ mod tests {
     use super::super::super::operations::OperationState;
     use super::*;
 
+    /// PERSO-340: an invitation addressed by row, as the TUI's agenda and
+    /// `event.respond` of `imip:<row_id>` address it, is named by its own
+    /// copy's selector, UID included, when its mailbox holds a second copy of
+    /// the Message-ID; the bare selector the reply's answer and refusals
+    /// carried names both copies.
+    #[test]
+    fn an_invitation_row_with_a_twin_is_named_by_its_own_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let raw = b"From: chair@example.org\r\nTo: me@example.org\r\n\
+            Subject: Invitation: planning\r\nMessage-ID: <invite@example.org>\r\n\
+            Date: Thu, 19 Nov 2026 10:00:00 +0000\r\nContent-Type: text/plain\r\n\r\n\
+            Please come.\r\n";
+        let email = crate::parse::parse_rfc822_to_fetched_email(raw).unwrap();
+        let row_ids = [1, 2].map(|uid| {
+            crate::ingest::ingest_twin(
+                &store,
+                &blobs,
+                &crate::ingest::IngestInput {
+                    account: "work",
+                    mailbox: "inbox",
+                    uid,
+                    email: &email,
+                    raw: Some(raw),
+                },
+            )
+        });
+        for (uid, row_id) in [1, 2].into_iter().zip(row_ids) {
+            let (row, selector) = row_by_id(&store, "work", row_id).unwrap();
+            assert_eq!(row.uid, uid);
+            assert_eq!(
+                selector.to_string(),
+                format!("mp://work/inbox/invite@example.org/{uid}")
+            );
+        }
+    }
+
     /// A failed change whose recipients ended with `verdicts`, as
     /// [`unreached`] words it.
     fn failed_change(verdicts: &[(&str, crate::send::RecipientVerdict, &str)]) -> String {

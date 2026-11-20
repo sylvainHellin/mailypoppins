@@ -1788,6 +1788,50 @@ fn to_value<T: serde::Serialize>(what: &str, value: &T) -> Result<Value, RpcErro
 mod tests {
     use super::*;
 
+    /// PERSO-340: a reply or a forward addressed by row or by
+    /// `<mailbox>/<uid>` names its source by that copy's selector, UID
+    /// included, when the mailbox holds a second copy of the Message-ID, as
+    /// one addressed by that selector already did; the bare selector names
+    /// both copies and resolves to neither.
+    #[test]
+    fn a_source_with_a_twin_is_named_by_its_own_copy_however_it_is_addressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let raw = b"From: ada@example.org\r\nTo: me@example.org\r\nSubject: Twice\r\n\
+            Message-ID: <twice@example.org>\r\nDate: Thu, 19 Nov 2026 10:00:00 +0000\r\n\
+            Content-Type: text/plain\r\n\r\nThe same, twice.\r\n";
+        let email = crate::parse::parse_rfc822_to_fetched_email(raw).unwrap();
+        for uid in [1, 2] {
+            crate::ingest::ingest_twin(
+                &store,
+                &blobs,
+                &crate::ingest::IngestInput {
+                    account: "work",
+                    mailbox: "inbox",
+                    uid,
+                    email: &email,
+                    raw: Some(raw),
+                },
+            );
+        }
+        for uid in [1, 2] {
+            let expected = format!("mp://work/inbox/twice@example.org/{uid}");
+            let row_id = crate::store::read::find_row_by_uid(&store, "work", "inbox", uid)
+                .unwrap()
+                .unwrap();
+            for source in [
+                json!({"row_id": row_id}),
+                json!({"id": format!("inbox/{uid}")}),
+                json!({"selector": expected}),
+            ] {
+                let (row, selector) = address_received(&source, &store, "work").unwrap();
+                assert_eq!(row.uid, uid, "{source}");
+                assert_eq!(selector.to_string(), expected, "{source}");
+            }
+        }
+    }
+
     /// The already-sent answer labels its time UTC, so a `sent_at` written
     /// with another offset, as a hand-edited file may carry it, is converted
     /// rather than printed as its local wall time (PERSO-317).

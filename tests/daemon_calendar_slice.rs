@@ -548,6 +548,31 @@ async fn a_none_accounts_view_is_its_imip_agenda() {
     assert_eq!(got["event"]["uid"], LOCAL_UID);
 }
 
+/// PERSO-340: an invitation mail whose mailbox holds a second copy of its
+/// Message-ID sources its event by that copy's selector, UID included, so a
+/// client that opens the mail from the event reaches it; the bare selector
+/// names both copies and is refused as ambiguous.
+#[tokio::test]
+async fn an_invitation_with_a_twin_sources_its_event_by_its_own_copy() {
+    let slice = Slice::start_seeded(
+        false,
+        &[],
+        |root| read_fixture::ingest_copy_of(root, IMIP, "inbox", 2, "<loc-day@example.com>"),
+        Vec::new(),
+    );
+    let mut conn = slice.connect().await;
+    let row_id = row_of(slice.root(), IMIP);
+    let events = view(&mut conn, json!({"accounts": [IMIP]})).await;
+    let event = events
+        .iter()
+        .find(|event| event["source"]["row_id"] == row_id)
+        .unwrap_or_else(|| panic!("the invitation's event: {events:?}"));
+    assert_eq!(
+        event["source"]["selector"],
+        "mp://perso/inbox/loc-day@example.com/1"
+    );
+}
+
 /// Every answer reaches the fake with its comment and its send choice, the
 /// operation settles with what it did, and the immediate sync leaves the
 /// event readable; a comment on an answer not sent is refused before the

@@ -2086,6 +2086,34 @@ pub fn given_up_uids(
     })
 }
 
+/// Ingest `input` as one more copy beside every row its mailbox already
+/// holds, as a sync whose listing carries all their UIDs does: the way a test
+/// puts two copies of one Message-ID in one mailbox (PERSO-239), which a
+/// plain [`ingest_message`] would rebind onto the first row instead. Answers
+/// the new row's id.
+#[cfg(test)]
+pub(crate) fn ingest_twin(store: &Store, blobs: &BlobStore, input: &IngestInput) -> i64 {
+    let listed: std::collections::HashSet<i64> = store
+        .conn()
+        .prepare("SELECT uid FROM messages WHERE account = ?1 AND mailbox = ?2")
+        .and_then(|mut statement| {
+            statement
+                .query_map((input.account, input.mailbox), |row| row.get(0))?
+                .collect()
+        })
+        .expect("the mailbox's UIDs");
+    let outcome = ingest_message_threaded(
+        store,
+        blobs,
+        input,
+        &RebindPolicy::UnlessListed(&listed),
+        None,
+    )
+    .expect("ingest the second copy");
+    assert!(outcome.inserted, "a second copy is a row of its own");
+    outcome.row_id
+}
+
 /// Move every recorded failure back by [`FAILURE_SPACING_SECS`], as the time
 /// between two passes an hour apart would: what lets a test count its next
 /// failure (PERSO-333 review).

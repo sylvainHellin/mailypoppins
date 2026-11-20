@@ -1799,6 +1799,58 @@ mod tests {
         }
     }
 
+    /// Two copies of `<twice@x>` in `account`'s inbox, at UIDs 1 and 2.
+    fn twins(store: &Store, blobs: &BlobStore, account: &str) {
+        for uid in [1, 2] {
+            crate::ingest::ingest_twin(
+                store,
+                blobs,
+                &crate::ingest::IngestInput {
+                    account,
+                    mailbox: "inbox",
+                    uid,
+                    email: &email("<twice@x>"),
+                    raw: None,
+                },
+            );
+        }
+    }
+
+    /// PERSO-340: `message.fetch` of a message the store already holds
+    /// answers the row it found by that copy's selector, UID included, when
+    /// the copy's mailbox holds a second one; the bare selector names both.
+    #[test]
+    fn a_held_row_with_a_twin_is_answered_by_its_own_copy() {
+        let _data = crate::config::test_env::TestDataDir::new();
+        let store = Store::open(crate::config::store_path("acct")).unwrap();
+        twins(&store, &BlobStore::for_account("acct"), "acct");
+        let held = held_row("acct", "<twice@x>").unwrap().expect("held");
+        let uid = held["uid"].as_i64().unwrap();
+        assert_eq!(held["selector"], format!("mp://acct/inbox/twice@x/{uid}"));
+    }
+
+    /// PERSO-340: a fetch that lands on a copy whose mailbox holds a second
+    /// one answers that copy's selector, UID included.
+    #[test]
+    fn an_ingest_beside_a_twin_answers_its_own_copy() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        twins(&store, &blobs, "acct");
+        let (_, selector, _) = ingest_into(
+            &store,
+            &blobs,
+            "acct",
+            "inbox",
+            2,
+            &email("<twice@x>"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(selector, "mp://acct/inbox/twice@x/2");
+    }
+
     /// PERSO-291: a hit carries its body as a reader sees it, so every
     /// client's preview pane and the 300-character preview of `mp search`
     /// open on the text rather than on the blank lines above it.
