@@ -3869,14 +3869,21 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 - A Graph store UID is a 63-bit hash that `JSON.parse` rounds above 2^53: never put it on the wire for a client to show or key on.
 - A Graph message given up on is only downloaded again on a full sync: once it stops owing a write the delta token is minted, and quick passes walk only changed messages.
 
-## lettre 0.11.19 glues the lines of a multi-line SMTP reply together (2026-11-20, PERSO-336)
+## lettre joins a multi-line SMTP reply itself from 0.11.23 on (2026-11-20, PERSO-336, PERSO-338)
 
-- A reply over several lines reaches the error as one string with nothing between the lines; the enhanced code each continuation line repeats is the only joint left, which `src/send/words.rs` parts at.
-- A reply that is a bare code with no space after it does not parse and reads as no verdict; lettre 0.11.23 separates the lines and 0.11.24 accepts the bare code.
+- lettre 0.11.23 joins a multi-line reply with spaces and keeps its repeated enhanced code once, and 0.11.24 accepts a bare code such as `550`, so use the reply's text as it comes; 0.11.19 glued the lines with nothing between them and read a bare code as no verdict.
 - Render an SMTP error from `status()` and `source()`, never from lettre's Display, and classify from the code and the server's text, never from the rendering.
+- lettre 0.11.24 adds no CRLF after a message that ends in one, and mp's lettre-built messages always do, so the server's data equals the built bytes.
+- `git stash push -- Cargo.lock` runs a new test against the old dependency without touching the code.
 
 ## A coalesced change moves to the tail, so it must not cross a lifecycle event (2026-11-20, PERSO-337)
 
 - A Replace merged into a queued one takes the newer revision and moves to the tail; a lifecycle event queued between the two (`config.changed`) was then read before the state committed ahead of it.
 - The swap's own first sync commits a second state for an added account within a millisecond, so the merge needed only a slow connection writer: about 1 in 430 runs under a load average of 80.
 - To find such a race, loop the test six at a time beside a busy suite, and log revisions on both the commit side and the client side.
+
+## A calendar-only account is local-only for mail and still has a server (2026-11-20, PERSO-318)
+
+- `is_local_only()` is true for an account with a `calendar_backend` and no mail server, so every sentence and gate written for "no server" has to ask `syncs_only_a_calendar()` first.
+- `password_from` takes only imap or smtp, so a calendar-only EWS account stores its password under the imap key.
+- A calendar failure is the tick's own error only on a calendar-only account; on a mail account it stays a log line and changes neither the tick's outcome nor the backoff.
