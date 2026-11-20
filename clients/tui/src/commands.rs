@@ -631,9 +631,11 @@ fn operation_error(payload: &Value) -> String {
 /// to stop, and a parked pass that started as soon as the running one ended
 /// would undo that. The cancelled finish ends the line ([`settled`]); a
 /// cancel the daemon answers too late says nothing was cancelled, since that
-/// pass's own end has said how it went or is about to. Another client's sync
-/// is not this window's to stop, so with none of its own running the key says
-/// so.
+/// pass's own end has said how it went or is about to. The key names only
+/// this window's passes, so with none of its own running it says so; a pass
+/// of this window that joined a tick already running stops that tick in the
+/// daemon, whoever started it, and a pass of this window that another
+/// client's cancel stopped that way ends `cancelled` here too.
 fn cancel_syncs(app: &mut App, commands: &dyn Queries) {
     let parked = matches!(app.queued_action, Some(Action::Fetch | Action::Sync));
     if parked {

@@ -91,9 +91,12 @@ pub fn refused_rebuild_line(saved: &str, contacts: u64, kept: u64) -> Option<Str
 /// The line a sync the user cancelled ends with, in every client
 /// (PERSO-321).
 ///
-/// The daemon keeps what the pass ingested before it stopped, announces it
-/// to every client (PERSO-133), and the next pass resumes from the cursors it
-/// left, so the line says so rather than that the work is lost.
+/// The daemon stops the pass at its next mailbox or batch, the tick it
+/// joined included when it joined one already running, keeps what it
+/// ingested before the stop, announces it to every client (PERSO-133), and
+/// the next pass resumes from the cursors it left, so the line says so rather
+/// than that the work is lost. It is also the line of a pass whose tick
+/// another client's cancel stopped: that pass is settled `cancelled` too.
 pub fn sync_cancelled_line(account: &str) -> String {
     format!(
         "Sync of {account} cancelled: what it already ingested stays, \

@@ -180,8 +180,11 @@ import AccordionItem from '../components/AccordionItem.astro';
           <p>
             Yes: press <code>Ctrl-C</code> during <code>mp sync</code>, <code>sx</code> in the TUI,
             or Cancel on the sync's card in the desktop app (<code>sx</code> works there too). The
-            sync stops at its next mailbox or batch of messages; what it already ingested stays,
-            and the next sync goes on from there. Each client cancels only the syncs it started.
+            sync stops after the mailbox or the batch of messages it is on; what it already
+            ingested stays, and the next sync goes on from there. A client cancels the syncs it
+            started; when one of them had joined a sync of the same account already running (the
+            daemon's own, or another client's), that sync stops with it, and the other client
+            says its sync was cancelled.
             Quitting the TUI or closing the desktop window does not stop a sync: it finishes in the
             background.
           </p>

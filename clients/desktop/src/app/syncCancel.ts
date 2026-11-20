@@ -1,8 +1,10 @@
 // Cancelling a sync this window started (PERSO-321): the activity area's
 // card and `sx` call `operation_cancel`, the call the TUI's `sx` and the
 // CLI's ^C make. The daemon settles the pass `cancelled` at once and the pass
-// stops at its next boundary, keeping what it ingested, which it announces to
-// every window itself (PERSO-133); its end's words are `syncCancelledText`
+// stops at its next boundary, the tick it joined included when it joined one
+// already running, keeping what it ingested, which it announces to every
+// window itself (PERSO-133); a pass of this window whose tick another
+// client's cancel stopped ends `cancelled` the same way. Its end's words are `syncCancelledText`
 // in the reducer's pending.ts. The words are the ones mp-client's
 // `format::sync_cancelled_line` and `sync_cancel_too_late_line` give the TUI
 // and the CLI.
@@ -41,8 +43,8 @@ export async function cancelSync(dispatch: Dispatch<Action>, operationId: string
 
 /**
  * `sx` and the palette's "Cancel the running sync": every sync this window
- * awaits. Another window's sync is not this one's to stop, so with none of
- * its own running it says so.
+ * awaits. It names only this window's syncs, so with none of its own
+ * running it says so.
  */
 export function cancelSyncs(s: AppState, dispatch: Dispatch<Action>): void {
   const running = Object.entries(s.syncs);
