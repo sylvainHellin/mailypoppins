@@ -3900,3 +3900,16 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 ## An unparsable IMAP answer prints twice through anyhow (2026-11-20, PERSO-323)
 
 - async-imap reports an unparsable answer as an `io::Error` reading `{nom_error:?} during parsing of {text:?}`, which anyhow's `{:#}` prints twice; reads of the server's answer go through `imap_client::words::in_server_words` or `server_words`, and the fake IMAP server's `garble_idlers` and `garble_next_select` reproduce it in a daemon test.
+
+## A command that resolves first must readdress the copy it resolved (2026-11-20)
+
+- `mp export` and `mp save` resolve a selector with one call and address the row again with a second, phrased in the selector the first answered; an answer that dropped a twinned copy's UID made the second call ambiguous where `mp show`, a single call, was not, so every single-row answer carries `selector::of_row`, the UID-qualified selector a listing prints for a twin.
+- A server search hit is resolved by Message-ID, which every copy shares; picking the first row by `(mailbox, uid)` named the Inbox copy of a hit in Sent, so the row in the hit's own mailbox comes first.
+
+## A runtime tick carries only its own bound (2026-11-20)
+
+- `sync.quick` with a `limit` went through the runtime tick whenever no `--mailbox` or `--dry-run` was named, and the tick takes `QUICK_TICK_LIMIT`, so `mp sync -n N` over a whole account silently ran the newest 100; a limit other than the tick's now takes the guarded pass, as a mailbox subset does.
+
+## A closed stdout is a println panic in Rust (2026-11-20)
+
+- Rust starts with SIGPIPE ignored, so `mp ... | head` panicked in `println!`; resetting SIGPIPE to its default would also make a write to a daemon socket that went away kill the client without a word, so `main` keeps it ignored and its panic hook ends the process by SIGPIPE only for `std`'s "failed printing to stdout/stderr" panic carrying EPIPE; `mp daemon run` keeps the default hook, since a failed print in one task must not end the daemon.
