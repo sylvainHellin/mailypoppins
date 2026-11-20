@@ -1357,7 +1357,14 @@ mod tests {
         fs::write(folder.join("a.txt"), "a").unwrap();
         fs::write(folder.join(".hidden"), "h").unwrap();
         let text = fs::read_to_string(&draft).unwrap();
-        let text = text.replacen("---\n", "---\nattachments:\n  - perso-215-anlagen\n", 1);
+        // The skeleton carries a bare `attachments:` key; a second one would
+        // be a duplicate key, which no YAML parser reads as a frontmatter.
+        assert!(text.contains("\nattachments:\n---\n"), "{text}");
+        let text = text.replacen(
+            "\nattachments:\n---\n",
+            "\nattachments:\n  - perso-215-anlagen\n---\n",
+            1,
+        );
         fs::write(&draft, text).unwrap();
 
         let listed = draft_attachments_on(&door, "work", "angebot-antwort").unwrap();
