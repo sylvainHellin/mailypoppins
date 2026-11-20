@@ -18,24 +18,35 @@ pub(super) struct Alert {
 }
 
 /// The persistent alert for the account the sidebar is showing, or `None`
-/// when there is nothing wrong with it.
-///
-/// Below the two failures, the messages the sync has given up on (PERSO-334):
-/// a sync that fails says nothing new about them.
+/// when there is nothing wrong with it: the first of [`account_alerts`].
+#[cfg(test)]
+pub(super) fn account_alert(app: &App) -> Option<Alert> {
+    account_alerts(app).into_iter().next()
+}
+
+/// The persistent alerts for the account the sidebar is showing, in the order
+/// they are drawn; empty when there is nothing wrong with it.
 ///
 /// A login the server rejected (PERSO-296) comes first, with the sentence
 /// the daemon's health check and the desktop app use, because it names the
 /// way out; the failed sync it causes would only repeat the server's
 /// refusal. Otherwise the last sync's failure (#0071), until a sync works.
 ///
+/// Below either, the messages the sync has given up on (PERSO-334), shown
+/// beside a failure as the desktop's sidebar shows them: the failure says
+/// nothing about them, and they are still not downloaded.
+///
 /// This is the surface that does not depend on winning the status-line race:
 /// it is rendered from the account's own state every frame, so it stays up
 /// while other accounts sync successfully and disappears only when *this*
 /// account's login is accepted or its sync works.
-pub(super) fn account_alert(app: &App) -> Option<Alert> {
-    let acct = app.accounts.get(app.active_account)?;
+pub(super) fn account_alerts(app: &App) -> Vec<Alert> {
+    let Some(acct) = app.accounts.get(app.active_account) else {
+        return Vec::new();
+    };
+    let mut alerts = Vec::new();
     if let Some(login) = app.login_rejected(app.active_account) {
-        return Some(Alert {
+        alerts.push(Alert {
             headline: "\u{26a0} login rejected".to_string(),
             reason: mp_core::mp_command::login_rejected_detail(
                 &acct.account_config.name,
@@ -47,9 +58,8 @@ pub(super) fn account_alert(app: &App) -> Option<Alert> {
             ),
             rows: LOGIN_REASON_ROWS,
         });
-    }
-    if let Some((headline, reason)) = acct.sync_health.failure_lines() {
-        return Some(Alert {
+    } else if let Some((headline, reason)) = acct.sync_health.failure_lines() {
+        alerts.push(Alert {
             headline,
             reason,
             rows: REASON_ROWS,
@@ -57,22 +67,24 @@ pub(super) fn account_alert(app: &App) -> Option<Alert> {
     }
     // The messages the sync has given up on (PERSO-334): the first named in
     // the server's words, the count of the rest.
-    let first = acct.given_up.first()?;
-    let count = acct.given_up.len();
-    let headline = if count == 1 {
-        "\u{26a0} 1 message not downloaded".to_string()
-    } else {
-        format!("\u{26a0} {count} messages not downloaded")
-    };
-    let mut reason = mp_client::format::given_up_brief(first, chrono::Local::now());
-    if count > 1 {
-        reason.push_str(&format!(" And {} more.", count - 1));
+    if let Some(first) = acct.given_up.first() {
+        let count = acct.given_up.len();
+        let headline = if count == 1 {
+            "\u{26a0} 1 message not downloaded".to_string()
+        } else {
+            format!("\u{26a0} {count} messages not downloaded")
+        };
+        let mut reason = mp_client::format::given_up_brief(first, chrono::Local::now());
+        if count > 1 {
+            reason.push_str(&format!(" And {} more.", count - 1));
+        }
+        alerts.push(Alert {
+            headline,
+            reason,
+            rows: GIVEN_UP_ROWS,
+        });
     }
-    Some(Alert {
-        headline,
-        reason,
-        rows: GIVEN_UP_ROWS,
-    })
+    alerts
 }
 
 /// Rows a message given up on gets: four, for the mailbox and UID, the
@@ -94,7 +106,10 @@ const LOGIN_REASON_ROWS: usize = 3;
 /// is clipped away. Fixed rather than measured, so the layout never disagrees
 /// with the wrap about how tall the block is.
 pub(super) fn alert_rows(app: &App) -> u16 {
-    account_alert(app).map_or(0, |alert| 1 + alert.rows as u16)
+    account_alerts(app)
+        .iter()
+        .map(|alert| 1 + alert.rows as u16)
+        .sum()
 }
 
 /// Hard-wrap `text` on word boundaries into exactly `rows` lines of at most
@@ -235,7 +250,7 @@ pub(super) fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         lines.push(Line::from(Span::styled(label, style)));
     }
 
-    if let Some(alert) = account_alert(app) {
+    for alert in account_alerts(app) {
         let width = inner.width.saturating_sub(1) as usize;
         lines.push(Line::from(Span::styled(
             format!(" {}", truncate(&alert.headline, width)),
