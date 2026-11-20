@@ -2,8 +2,8 @@
 //!
 //! Every row runs a real `mp daemon run` against the calendar fixture with the
 //! calendar fake armed through `MAILYPOPPINS_DAEMON_FAKE_CALENDAR` and the
-//! fake transport through `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, and runs the
-//! `mp` binary against it:
+//! account without a backend on the fake SMTP and IMAP servers of
+//! `tests/support/` (PERSO-331), and runs the `mp` binary against it:
 //!
 //! - `mp calendar rebuild` reports the server resync beside the reply fold;
 //! - `mp calendar list` prints the fake's calendars and the invitation
@@ -24,7 +24,7 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Output;
 
 use chrono::{Datelike, Days, NaiveDate, Utc};
@@ -36,8 +36,10 @@ use mailypoppins::calendar_backend::Response;
 use mailypoppins::calendar_model::{Event, EventTime};
 
 use support::calendar_fixture::{at, day, event, fake_spec_with, request_ics, seed, IMIP, SERVER};
+use support::fake_smtp::{SmtpAnswer, SmtpStep};
 use support::parity::DaemonFixture;
-use support::{read_fixture, send_fixture};
+use support::read_fixture;
+use support::wire_fixture::WireServers;
 
 /// The invitation mail of the account with a backend, about the server's
 /// meeting.
@@ -154,69 +156,70 @@ fn proposed_occurrence() -> Event {
     retro
 }
 
-/// A seeded root, its daemon, and the logs of the two fakes.
+/// A seeded root, its daemon, the calendar fake's log and the fake servers
+/// [`IMIP`] sends over.
 struct Slice {
     tmp: TempDir,
     ledger: TempDir,
     daemon: Option<DaemonFixture>,
+    wire: WireServers,
 }
 
 impl Slice {
     fn start() -> Slice {
-        Slice::start_rejecting(&[])
+        Slice::start_refusing(&[])
     }
 
-    /// A slice whose SMTP fake refuses `rejected` for good.
-    fn start_rejecting(rejected: &[(&str, &str)]) -> Slice {
-        Slice::start_with(rejected, seed_outlook)
+    /// A slice whose SMTP server answers the `RCPT` of each of `refused`
+    /// with its reply, for good: a `5xx` refuses, a `4xx` defers.
+    fn start_refusing(refused: &[(&str, &str)]) -> Slice {
+        Slice::start_with(refused, seed_outlook)
     }
 
     /// The slice with the account without a backend also holding the sent
     /// copies of two invitations it organised (PERSO-204).
     fn start_organised() -> Slice {
-        Slice::start_organised_rejecting(&[])
+        Slice::start_organised_refusing(&[])
     }
 
-    /// The same, the SMTP fake refusing `rejected` for good.
-    fn start_organised_rejecting(rejected: &[(&str, &str)]) -> Slice {
-        Slice::start_organised_with(|log| send_fixture::fake_transport_rejecting(log, rejected))
+    /// The same, the SMTP server answering the `RCPT` of each of `refused`
+    /// with its reply, for good.
+    fn start_organised_refusing(refused: &[(&str, &str)]) -> Slice {
+        Slice::start_organised_with(|wire| refuse_all(wire, refused))
     }
 
-    /// The same, the SMTP fake armed with what `transport` makes of its
-    /// ledger's path.
-    fn start_organised_with(transport: impl FnOnce(&Path) -> String) -> Slice {
-        Slice::start_armed(transport, |root| {
+    /// The same, with what `setup` makes of the fake servers.
+    fn start_organised_with(setup: impl FnOnce(&WireServers)) -> Slice {
+        Slice::start_wired(setup, |root| {
             seed_outlook(root);
             support::calendar_fixture::seed_organised(root);
         })
     }
 
-    fn start_with(rejected: &[(&str, &str)], seed_root: impl FnOnce(&Path)) -> Slice {
-        Slice::start_armed(
-            |log| send_fixture::fake_transport_rejecting(log, rejected),
-            seed_root,
-        )
+    fn start_with(refused: &[(&str, &str)], seed_root: impl FnOnce(&Path)) -> Slice {
+        Slice::start_wired(|wire| refuse_all(wire, refused), seed_root)
     }
 
-    fn start_armed(
-        transport: impl FnOnce(&Path) -> String,
-        seed_root: impl FnOnce(&Path),
-    ) -> Slice {
+    /// The root `seed_root` writes, [`IMIP`] moved onto the fake servers and
+    /// the daemon over it; `setup` makes what it tests of the servers once
+    /// the daemon's first drain has run ([`WireServers::await_startup_drain`]).
+    fn start_wired(setup: impl FnOnce(&WireServers), seed_root: impl FnOnce(&Path)) -> Slice {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = tempfile::tempdir().unwrap();
         seed_root(tmp.path());
+        let wire = WireServers::start();
+        wire.wire(tmp.path(), IMIP);
         let events = [weekly(), vec![proposed(), proposed_occurrence()]].concat();
         let spec = fake_spec_with(&ledger.path().join("calendar.jsonl"), false, events);
-        let transport = transport(&ledger.path().join("transport.log"));
-        let env = [
-            (FAKE_CALENDAR_ENV, spec.as_str()),
-            (send_fixture::FAKE_TRANSPORT_ENV, transport.as_str()),
-        ];
+        let env = [(FAKE_CALENDAR_ENV, spec.as_str())];
         let daemon = DaemonFixture::start_with(tmp.path(), None, &env);
+        wire.await_startup_drain(tmp.path(), IMIP);
+        setup(&wire);
         Slice {
             tmp,
             ledger,
             daemon: Some(daemon),
+            wire,
         }
     }
 
@@ -267,9 +270,14 @@ impl Slice {
             })
             .unwrap_or_default()
     }
+}
 
-    fn transport_log(&self) -> PathBuf {
-        self.ledger.path().join("transport.log")
+/// The SMTP server answers the `RCPT` of each of `refused` with its reply,
+/// for good.
+fn refuse_all(wire: &WireServers, refused: &[(&str, &str)]) {
+    for (address, reply) in refused {
+        wire.smtp
+            .answer_for(address, SmtpStep::Rcpt, Some(SmtpAnswer::reply(reply)));
     }
 }
 
@@ -807,12 +815,11 @@ fn mp_invite_still_answers_an_imip_invitation() {
         replied.trim(),
         "\u{2713} Accepted: LOC Day planning \u{2014} replied to chair@tum.de"
     );
-    let submitted = send_fixture::transport_events(&slice.transport_log())
+    let submitted = slice
+        .wire
+        .submissions()
         .into_iter()
-        .filter(|event| {
-            matches!(event, send_fixture::TransportEvent::Submit { address, accepted: true, .. }
-                if address == "chair@tum.de")
-        })
+        .filter(|(_, address, acknowledged)| address == "chair@tum.de" && *acknowledged)
         .count();
     assert_eq!(submitted, 1, "the reply reached the organizer");
 
@@ -844,7 +851,7 @@ fn mp_invite_still_answers_an_imip_invitation() {
 /// the same error on stderr (PERSO-200).
 #[test]
 fn an_undelivered_imip_reply_fails_with_and_without_json() {
-    let slice = Slice::start_rejecting(&[("chair@tum.de", "550 5.1.1 no such mailbox")]);
+    let slice = Slice::start_refusing(&[("chair@tum.de", "550 5.1.1 no such mailbox")]);
     let event = format!("imip:{}", row_of(slice.root(), IMIP));
 
     let out = slice.run(&["event", "respond", &event, "accept", "-A", IMIP, "--json"]);
@@ -1334,7 +1341,7 @@ fn an_invitation_the_account_organised_changes_through_the_cli() {
 /// refused it for, as `mp send` prints a refused recipient.
 #[test]
 fn an_invitation_update_names_the_attendees_the_server_refused() {
-    let slice = Slice::start_organised_rejecting(&[("cy@example.com", "550 no such user")]);
+    let slice = Slice::start_organised_refusing(&[("cy@example.com", "550 no such user")]);
     let meeting = sent_row(slice.root(), "budget-review");
     let out = slice.ok(&[
         "event",
@@ -1348,7 +1355,7 @@ fn an_invitation_update_names_the_attendees_the_server_refused() {
         IMIP,
     ]);
     assert!(
-        out.contains("\u{2717} cy@example.com (To): 550 no such user"),
+        out.contains("\u{2717} cy@example.com (To): permanent error (550): no such user"),
         "{out}"
     );
 }
@@ -1359,12 +1366,10 @@ fn an_invitation_update_names_the_attendees_the_server_refused() {
 /// refused for good.
 #[test]
 fn an_invitation_change_says_who_waits_in_the_outbox_and_who_was_refused() {
-    let slice = Slice::start_organised_with(|log| {
-        serde_json::json!({"log": log.to_string_lossy(),
-                           "reject": {"cy@example.com": "550 no such user"},
-                           "defer": {"bob@example.com": "451 4.7.1 try again later"}})
-        .to_string()
-    });
+    let slice = Slice::start_organised_refusing(&[
+        ("cy@example.com", "550 no such user"),
+        ("bob@example.com", "451 4.7.1 try again later"),
+    ]);
     let meeting = sent_row(slice.root(), "budget-review");
     let out = slice.ok(&[
         "event",
@@ -1379,23 +1384,25 @@ fn an_invitation_change_says_who_waits_in_the_outbox_and_who_was_refused() {
     ]);
     assert!(
         out.contains(
-            "\u{2717} cy@example.com (To): 550 no such user; refused for good, so they will \
-             not get it"
+            "\u{2717} cy@example.com (To): permanent error (550): no such user; refused for good, \
+             so they will not get it"
         ),
         "{out}"
     );
     assert!(
         out.contains(
-            "\u{29d7} bob@example.com (To): 451 4.7.1 try again later; waits in the outbox \
-             and goes out with a later sync"
+            "\u{29d7} bob@example.com (To): transient error (451): 4.7.1 try again later; waits \
+             in the outbox and goes out with a later sync"
         ),
         "{out}"
     );
 
-    let parked = Slice::start_organised_with(|log| {
-        send_fixture::fake_transport_unconfirming(
-            log,
-            &[("bob@example.com", send_fixture::AMBIGUOUS)],
+    // The server takes the message for Bob and hangs up before its verdict.
+    let parked = Slice::start_organised_with(|wire| {
+        wire.smtp.answer_for(
+            "bob@example.com",
+            SmtpStep::Message,
+            Some(SmtpAnswer::HangUp),
         )
     });
     let meeting = sent_row(parked.root(), "budget-review");
@@ -1406,7 +1413,7 @@ fn an_invitation_change_says_who_waits_in_the_outbox_and_who_was_refused() {
             "? bob@example.com (To): {}; parked in the outbox with no verdict, so they may \
              have it: check, then find its row with mp outbox list -A {IMIP}, then mp outbox retry \
              -A {IMIP} <id> or mp outbox discard -A {IMIP} <id>",
-            send_fixture::AMBIGUOUS
+            "response error: incomplete response"
         )),
         "{out}"
     );
