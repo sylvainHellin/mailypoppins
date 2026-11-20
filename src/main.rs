@@ -4970,6 +4970,8 @@ async fn routed_contacts_rebuild(accounts: &[String]) -> Result<()> {
             "contact.rebuild",
             serde_json::json!({"account": account}),
             account,
+            // A rebuild writes the index afresh from the store.
+            mailypoppins::daemon::client::RUN_AGAIN,
         )
         .await?;
         let contacts = result["contacts"].as_u64().unwrap_or_default() as usize;
@@ -5238,7 +5240,13 @@ async fn routed_hooks_replay(
     )
     .await
     .map_err(|error| refusal(account, error))?;
-    let result = settle(&mut connection, &started).await?;
+    // A replay runs the hook whatever its cursor says, so a second run would
+    // run it a second time.
+    let list = mp_core::mp_command::here(&["hooks", "list", "-A", account]);
+    let next = format!(
+        "the hook may already have run: check its last run with `{list}` before replaying it again"
+    );
+    let result = settle_or(&mut connection, &started, &next).await?;
     let ok = result["ok"].as_bool().unwrap_or(false);
     let mark = if ok {
         "\u{2713}".green()
@@ -5382,7 +5390,8 @@ async fn respond(
         !answer.no_send_response,
         proposed,
     );
-    let result = run_admin_operation(connection, "event.respond", params, account).await?;
+    let next = event_write_next("event.respond", account, event);
+    let result = run_admin_operation(connection, "event.respond", params, account, &next).await?;
     serde_json::from_value(result).context("reading the settled event.respond result")
 }
 
@@ -5751,7 +5760,9 @@ async fn routed_event_update(
         }
     }
     let params = serde_json::to_value(params)?;
-    let result = run_admin_operation(&mut connection, "event.update", params, account).await?;
+    let next = event_write_next("event.update", account, event);
+    let result =
+        run_admin_operation(&mut connection, "event.update", params, account, &next).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
@@ -5828,9 +5839,11 @@ async fn routed_event_cancel(
     json: bool,
 ) -> Result<()> {
     let account = cancel.account.clone();
+    let next = event_write_next("event.cancel", &account, &cancel.event);
     let params = serde_json::to_value(cancel)?;
     let mut connection = operation_session().await;
-    let result = run_admin_operation(&mut connection, "event.cancel", params, &account).await?;
+    let result =
+        run_admin_operation(&mut connection, "event.cancel", params, &account, &next).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
@@ -5880,7 +5893,16 @@ async fn routed_event_delete(
         scope: scope.map(|scope| scope.word().to_string()),
     })?;
     let mut connection = operation_session().await;
-    let result = run_admin_operation(&mut connection, "event.delete", params, account).await?;
+    // A delete tells nobody, and a second run of one that took is refused
+    // naming the event it no longer finds.
+    let result = run_admin_operation(
+        &mut connection,
+        "event.delete",
+        params,
+        account,
+        mailypoppins::daemon::client::RUN_AGAIN,
+    )
+    .await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
@@ -6952,32 +6974,82 @@ async fn operation_session() -> mp_client::Connection {
 
 /// Start one operation of the admin slice and wait for its result, raising the
 /// refusal the daemon spelled out.
+///
+/// `next` is what the diagnostic says to do when the daemon went away while
+/// the operation ran: [`RUN_AGAIN`](mailypoppins::daemon::client::RUN_AGAIN)
+/// for one a second run cannot repeat the effect of, else how to check what
+/// the first run did ([`event_write_next`]).
 async fn run_admin_operation(
     connection: &mut mp_client::Connection,
     method: &str,
     params: serde_json::Value,
     account: &str,
+    next: &str,
 ) -> Result<serde_json::Value> {
     match run_operation_awaiting_open(connection, method, params, DAEMON_TIMEOUT).await {
         Ok(Settled::Done(result)) => Ok(result),
         Ok(Settled::Failed(message)) => Err(anyhow!("{message}")),
         Err(mp_client::ClientError::Rpc(error)) => Err(refusal(account, error)),
-        Err(mp_client::ClientError::Closed) => {
-            daemon_went_away("the connection closed with an operation still running")
+        Err(e @ (mp_client::ClientError::Closed | mp_client::ClientError::Io(_))) => {
+            mailypoppins::daemon::client::went_away(&format!("{method}: {e}"), next)
         }
         Err(e) => unanswered(method, e),
     }
 }
 
-/// Wait for an operation this slice started, with no progress to render.
+/// What to do when the daemon went away while `method` wrote `event` of
+/// `account` and told someone of it: the answer, the change or the
+/// cancellation may have reached the organizer or the attendees already, and
+/// a second run would mail them a second one, so the line says how to check
+/// first. A server event's state comes back with a sync; an invitation
+/// mail's (`imip:`) reply or change goes out through the outbox.
+fn event_write_next(method: &str, account: &str, event: &str) -> String {
+    let (what, who, again) = match method {
+        "event.respond" => ("the answer", "the organizer", "answering again"),
+        "event.update" => ("the change", "the attendees", "changing it again"),
+        _ => ("the cancellation", "the attendees", "cancelling it again"),
+    };
+    let show = mp_core::mp_command::here(&["event", "show", event, "-A", account]);
+    if event.starts_with("imip:") {
+        let outbox = mp_core::mp_command::here(&["outbox", "list", "-A", account]);
+        return format!(
+            "{what} may already have gone to {who}: check `{outbox}` and `{show}` before {again}"
+        );
+    }
+    let sync = mp_core::mp_command::here(&["sync", "-A", account]);
+    let check = if method == "event.respond" {
+        "check your answer with"
+    } else {
+        "check the event with"
+    };
+    format!(
+        "{what} may already have reached {who}: run `{sync}`, then {check} `{show}` before {again}"
+    )
+}
+
+/// Wait for an operation this slice started, with no progress to render: a
+/// store gc, a calendar rebuild, a cutover or a retention sweep, each of
+/// which a second run does again from what the first left.
 async fn settle(
     connection: &mut mp_client::Connection,
     started: &serde_json::Value,
 ) -> Result<serde_json::Value> {
+    settle_or(connection, started, mailypoppins::daemon::client::RUN_AGAIN).await
+}
+
+/// [`settle`], with `next` for what to do when the daemon went away first.
+async fn settle_or(
+    connection: &mut mp_client::Connection,
+    started: &serde_json::Value,
+    next: &str,
+) -> Result<serde_json::Value> {
     match connection.settle(started).await {
         Ok(Settled::Done(result)) => Ok(result),
         Ok(Settled::Failed(message)) => Err(anyhow!("{message}")),
-        Err(_) => daemon_went_away("the connection closed with an operation still running"),
+        Err(_) => mailypoppins::daemon::client::went_away(
+            "the connection closed with an operation still running",
+            next,
+        ),
     }
 }
 
@@ -8472,6 +8544,28 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A change to an event that tells someone, cut off by the daemon going
+    /// away, says how to check it before it is made again, for a server
+    /// event and for an invitation mail's.
+    #[test]
+    fn an_event_write_cut_off_says_how_to_check_it() {
+        assert_eq!(
+            super::event_write_next("event.update", "evoqs", "ev-1"),
+            "the change may already have reached the attendees: run `mp sync -A evoqs`, \
+             then check the event with `mp event show ev-1 -A evoqs` before changing it again"
+        );
+        assert_eq!(
+            super::event_write_next("event.cancel", "evoqs", "ev-1"),
+            "the cancellation may already have reached the attendees: run `mp sync -A evoqs`, \
+             then check the event with `mp event show ev-1 -A evoqs` before cancelling it again"
+        );
+        assert_eq!(
+            super::event_write_next("event.respond", "perso", "imip:42"),
+            "the answer may already have gone to the organizer: check `mp outbox list -A perso` \
+             and `mp event show 'imip:42' -A perso` before answering again"
+        );
+    }
+
     /// `mp sync`'s run over its accounts against a scripted stand-in daemon
     /// (PERSO-321): the `^C` branches no live daemon reaches on demand.
     mod sync_run {
