@@ -7178,6 +7178,18 @@ fn main() -> Result<()> {
     let matches = <Cli as clap::CommandFactory>::command().get_matches();
     let cli =
         <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // A closed stdout ends every command but the daemon itself, whose stdout
+    // nobody reads and whose tasks must outlive a failed print.
+    let serves = matches!(
+        &cli.command,
+        Some(Commands::Daemon {
+            action: mailypoppins::daemon::lifecycle::DaemonAction::Run { .. },
+            ..
+        })
+    );
+    if !serves {
+        end_on_a_closed_pipe();
+    }
     // The profile picks the config and data roots, so it is settled before
     // the log file or anything else resolves a path, and while this process
     // still has one thread, since settling it writes `MAILYPOPPINS_PROFILE`
@@ -7191,6 +7203,45 @@ fn main() -> Result<()> {
         .build()
         .context("starting the async runtime")?
         .block_on(run(matches, cli))
+}
+
+/// A closed stdout ends the command the way it ends `cat`, with nothing on
+/// stderr: `mp list-messages --json | head` stops once `head` has its lines.
+///
+/// Rust ignores SIGPIPE, so a print to a closed pipe is a panic in `println!`
+/// rather than the end of the process. The disposition stays ignored, since a
+/// write to a daemon socket that went away must stay an error the client can
+/// report; the panic hook instead recognises the failed print, by the sentence
+/// `std` panics with and the EPIPE it carries, and ends the process by the
+/// signal it would have died of. Any other panic goes to the hook before it.
+fn end_on_a_closed_pipe() {
+    let next = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied());
+        let closed_pipe = message.is_some_and(|message| {
+            message.starts_with("failed printing to std")
+                && message.ends_with(&format!("(os error {})", libc::EPIPE))
+        });
+        if closed_pipe {
+            end_by_the_closed_pipe();
+        }
+        next(info);
+    }));
+}
+
+/// End the process by SIGPIPE, the status a shell reports as 141.
+fn end_by_the_closed_pipe() -> ! {
+    // SAFETY: the default disposition for SIGPIPE, then the signal raised in
+    // this thread, which terminates the process; no handler runs.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        libc::raise(libc::SIGPIPE);
+    }
+    std::process::exit(128 + libc::SIGPIPE)
 }
 
 async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
@@ -7239,7 +7290,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
         let mut script = Vec::new();
         write_completions(*shell, &mut script)?;
         match io::stdout().write_all(&script) {
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => end_by_the_closed_pipe(),
             other => other?,
         }
         return Ok(());
