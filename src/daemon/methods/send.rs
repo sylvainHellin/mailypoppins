@@ -117,8 +117,6 @@ use super::super::operations::{OperationHandle, OperationId, OperationRegistry, 
 use super::super::state::{commit_point, CanonicalState, ConnectionId};
 use super::{internal, invalid_params, server_error, string_param};
 
-pub use crate::daemon::fake_transport::FAKE_TRANSPORT_ENV;
-
 /// The eight methods of the family, in method-name order.
 pub const SEND_METHOD_SPECS: [MethodSpec; 8] = [
     MethodSpec::new("send.approved", MethodKind::Operation, 1),
@@ -1084,33 +1082,12 @@ fn context_for(
         graph: is_graph
             .then(|| crate::config::GraphConfig::load(account))
             .transpose()?,
-        smtp: (!is_graph).then(|| smtp_config(account)).transpose()?,
+        smtp: (!is_graph).then(|| SmtpConfig::load(account)).transpose()?,
         account: account.clone(),
         email_settings: email.clone(),
         // The signature is already in the draft body (#0099).
         signature: None,
     })
-}
-
-/// The SMTP configuration, or the placeholder the fake transport needs: it *is*
-/// the transport, so it has no credentials to load (P4-U12).
-///
-/// Shared with `calendar.rsvp` (P4-U14), which submits an iMIP reply over the
-/// same transport and needs the same fake-transport escape hatch.
-pub(crate) fn smtp_config(account: &AccountConfig) -> anyhow::Result<SmtpConfig> {
-    match SmtpConfig::load(account) {
-        Ok(config) => Ok(config),
-        Err(_) if crate::daemon::fake_transport::armed() => Ok(SmtpConfig {
-            account: account.name.clone(),
-            host: "fake.invalid".to_string(),
-            port: 465,
-            username: String::new(),
-            password: String::new(),
-            default_from: account.default_from.clone(),
-            accept_invalid_certs: false,
-        }),
-        Err(e) => Err(e),
-    }
 }
 
 /// One send's report as the payload a client renders. `message_id` is the
@@ -1258,7 +1235,7 @@ async fn send_invite(
         body: plan.body.clone(),
         ics: crate::invite::build_invite_ics(&plan.spec)?,
     };
-    let smtp = smtp_config(account)?;
+    let smtp = SmtpConfig::load(account)?;
     let built = crate::invite::itip_built(account, &smtp.default_from, email, signature, &message)?;
     if !commit_point("send.invite", token).await {
         return Ok(None);

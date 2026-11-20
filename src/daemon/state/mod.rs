@@ -89,7 +89,7 @@ pub fn fake_ready_delay() -> Option<Duration> {
 /// `<dir>/<method>.returned` once the worker has returned; nothing else would
 /// let a test put an
 /// `operation.cancel` between the work that prepares a write and the write
-/// itself: on the fake transport both sides take milliseconds. With the hook
+/// itself: on the fake servers both sides take milliseconds. With the hook
 /// set, the worker creates `<dir>/<method>.held`, waits until its token is shut,
 /// the test creates `<dir>/<method>.release` (which lets a test order a second
 /// operation's plan before the first one's write without cancelling it), or

@@ -769,7 +769,6 @@ No new method carries the prompt: `mp config show` prints the line, the desktop 
 | `sent.rs` | `ImapSentMailbox`: the APPEND seam the outbox drives, faked in tests |
 | **`src/daemon/`** (the files the daemon section above does not name) | |
 | `sync_outcome.rs` | `from_sync_result`: an engine `SyncResult` to the wire's `SyncCompleted` (P3b-U6), plus the `MAILYPOPPINS_DAEMON_FAKE_SYNC_OUTCOME` fake the sync-slice tests arm |
-| `fake_transport.rs` | The daemon-side transport fake (P4-U12): `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` serves the SMTP submission and the Sent APPEND in process and logs each event, so the success half of the send slice is pinned without TLS |
 | `methods/message_server.rs` | `message.search_server` and `message.fetch` (P5-U10c): the server search every client runs (the TUI overlay, the desktop search bar, `mp search`), with its dedup, attachment post-filter and hit stream, and the overlay's `f` ingest |
 | `state/revision.rs` | The newtypes the canonical state is addressed by: `Revision` (dense, monotonic per instance), `InstanceId`, `ConnectionId` |
 | **`clients/tui/src/`** | |

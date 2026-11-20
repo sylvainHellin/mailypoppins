@@ -210,7 +210,7 @@ The one `account_not_ready` that is not a failure is `state: "opening"`, an acco
 `mp save` is the mirror image of it: the absolute destination is what crosses the socket, and the spelling the user typed is what the `✓` lines print.
 The direct engine paths those commands used are gone (P4-U15).
 `tests/daemon_send_slice.rs` is the gate for the send slice, over a fixture that adds a Graph account, an SMTP account with no credentials and a seeded outbox in every state the listing renders.
-Its successful sends are routed-side assertions rather than parity rows, because they run through `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` and the pre-daemon oracle has no such hook.
+Its successful sends are routed-side assertions rather than parity rows, because they move an account onto the fake SMTP and IMAP servers of `tests/support/` (PERSO-331), which the pre-daemon oracle has no account on.
 
 `tests/daemon_sync_slice.rs` is the gate for the sync/watch slice, with one sanctioned deviation: `mp watch --mailbox` naming anything but INBOX prints one extra line on stderr saying so, and that line is masked in that row alone.
 
@@ -708,7 +708,7 @@ A daemon wedged *inside* the sequence is the case `--timeout-secs` covers: the g
 
 ## Test-only environment hooks
 
-Twenty-one environment variables exist for the contract tests and for the migration.
+Twenty environment variables exist for the contract tests and for the migration.
 None of them has a flag, and none appears in `mp --help`.
 
 `MAILYPOPPINS_DAEMON_AUTOSTART=0` turns on-demand starting off, leaving the exit-4 diagnostic in its place.
@@ -752,16 +752,6 @@ The outcomes are committed off the bootstrap's own path and after its revision w
 Unset, empty, unparseable, or with no configured account it does nothing.
 It had a second gate until P5-U8, the account-runtimes opt-in, and lost it with the variable.
 It is what pins the socket cases in `tests/daemon_sync_outcome.rs`, and its name is `mailypoppins::daemon::sync_outcome::FAKE_SYNC_OUTCOME_ENV`.
-
-`MAILYPOPPINS_DAEMON_FAKE_TRANSPORT=<json>` serves the SMTP submission and the Sent-mailbox APPEND in process and writes one line per transport event to a log file.
-`src/send.rs`'s transport is TLS-only on both of its branches, so a plaintext `TcpListener` cannot serve it and a TLS one would need a certificate generator this tree does not depend on; without the hook every success path of the send slice would be unpinned.
-Its value is a JSON object, every key optional: `log` is the ledger path, `reject` maps a recipient address to the reason the server refuses it for good, `append` is `ok`, `fail` or `swallow_ack`, and `append_delay_ms` parks inside the APPEND.
-`swallow_ack` files the copy and reports a failure, which is the ambiguity the Message-ID dedup search exists for; the search answers out of the ledger, so a copy an earlier attempt filed is found by a later one.
-Each line is `submit <message-id> <address> accepted|rejected`, `append <mailbox> <message-id>` or `search <mailbox> <message-id>`, appended with one `O_APPEND` write so two concurrent drains cannot lose a line.
-An account with no credentials sends through it all the same: the fake *is* the transport, so a `SmtpConfig::load` that fails is replaced by a placeholder while the hook is armed.
-It is read by whichever process submits, which after P4-U12 is the daemon and only the daemon, so the pre-daemon oracle cannot see it and no row that uses it is a parity row.
-Unset, empty or unparseable it does nothing.
-It is what pins the successful sends in `tests/daemon_send_slice.rs`, and its name is `mailypoppins::daemon::methods::send::FAKE_TRANSPORT_ENV`.
 
 `MAILYPOPPINS_DAEMON_FAKE_CALENDAR=<json>` serves every account whose `calendar_backend` is not `none` from an in-memory calendar server (PERSO-200), so the calendar sync, the views, `event.respond`, `event.create`, `event.update`, `event.cancel`, `event.delete` and `calendar.freebusy` run without a tenant; one server per account lives as long as the daemon, so a write survives into the next sync.
 Its value is a JSON object, every key optional: `calendars` and `events` are the server's contents in the model's serialisation, each rewritten to the account it serves, `log` a file the fake appends one JSON line `{event, response, comment, send_response}` to per answer, `write_log` a file it appends one JSON line per write to (a `RecordedWrite`, tagged by `call`: `create`, `update`, `cancel`, `delete`, `dismiss_reminder`, `snooze_reminder`), `missing_scope` makes every call fail as a token without `Calendars.ReadWrite` does, `features` the `CalendarFeature` words `calendar.list` reports for the account (none when absent), `series` the series (`SeriesInfo`, each master with it) the server holds, which every baseline reports resolved and a write to a master's id reaches (a create with a rule makes one, its occurrences named by the master's id and their date; a sync after a change to a series reports it and every occurrence again, never an occurrence that left it, as Graph's delta does), `message_events` maps a mail's Graph id to the event `message.invite` names, and `free_busy` maps an address to its busy blocks (`ScheduleItem` `{start, end, status, subject?, location?}`), which `calendar.freebusy` answers with their view, any other address having no free/busy (`Proxy web request failed (5016)`).
@@ -847,8 +837,8 @@ The run that landed the file, its ceilings and the leak it found are in [baselin
 Every Phase 4 slice that moves a command onto the daemon is gated on byte parity with the pre-daemon binary, and `tests/support/parity.rs` is what makes that comparison (`tests/daemon_parity_harness.rs` tests the harness itself).
 
 `DaemonFixture::start(tmp)` boots `mp daemon run` against `tmp` used as `HOME`, `MAILYPOPPINS_DATA_DIR` and `MAILYPOPPINS_CONFIG_DIR` at once, clears the seventeen environment hooks of its `DAEMON_ENV_HOOKS` list so an exported variable cannot change an outcome, and returns once the daemon answers `daemon.status` with no account still `opening` its store.
-Four of the twenty-one above are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT`, which `tests/daemon_send_slice.rs` sets the same way, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` does.
-The asymmetry is deliberate per hook rather than by design, and it is in PERSO-225 as a thing to decide once rather than three times.
+Three of the twenty above are not among them: the two service hooks, because no fixture installs a login service and `tests/daemon_service.rs` sets both explicitly on every child it runs, and `MAILYPOPPINS_DAEMON_FAKE_CALENDAR`, which `tests/daemon_calendar_slice.rs` sets the same way.
+The asymmetry is deliberate per hook rather than by design, and it is in PERSO-225 as a thing to decide once rather than twice.
 `fixture.mp(args)` runs the client against the same root; `oracle(args, tmp)` runs the pre-daemon binary against **the same** root, so a config path in the output is the same string on both sides and the comparison stays literal instead of normalised.
 `stop` kills the daemon and waits for it to be gone, and `Drop` does the same, so a panicking test leaks nothing.
 

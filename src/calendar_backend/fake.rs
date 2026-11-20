@@ -4,8 +4,7 @@
 //! [`FakeCalendarBackend::canned`] and read the answers back with
 //! [`FakeCalendarBackend::responses`]. A daemon slice test cannot reach into
 //! the daemon's memory, so the daemon arms the fake from [`FAKE_CALENDAR_ENV`]
-//! instead, the way [`crate::daemon::fake_transport`] arms the SMTP fake, and
-//! the test reads the answers from the log, one JSON line per `respond`, and
+//! instead, and the test reads the answers from the log, one JSON line per `respond`, and
 //! the writes from the write log, one [`RecordedWrite`] line per create,
 //! update, cancel, delete, dismiss or snooze:
 //!

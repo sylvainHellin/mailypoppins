@@ -3115,8 +3115,7 @@ fn owe_rowless_send(
 
 /// The SMTP submission of one built message, behind a trait so the durable
 /// path and the resume are tested against a counting fake rather than a
-/// server or the env-armed fake transport, which would leak into every test
-/// running beside them.
+/// server.
 pub(crate) trait SmtpSubmit {
     fn submit(
         &self,
@@ -4172,22 +4171,6 @@ pub async fn drain_account_at(
         return crate::outbox::DrainResult::default();
     }
 
-    // The fake Sent mailbox stands in for the IMAP session, credentials and
-    // all (P4-U12): it is armed on the daemon and nowhere else.
-    if let Some(fake) = crate::daemon::fake_transport::fake_transport() {
-        let mut mailbox = crate::daemon::fake_transport::FakeSentMailbox::new(fake);
-        return match crate::outbox::drain_guarded(store, blobs, &account.name, &mut mailbox, now)
-            .await
-        {
-            Ok(Some(result)) => result,
-            Ok(None) => crate::outbox::DrainResult::default(),
-            Err(e) => {
-                log::warn!("[outbox] draining {} failed: {e:#}", account.name);
-                crate::outbox::DrainResult::default()
-            }
-        };
-    }
-
     let imap_config = match crate::config::ImapConfig::load(account) {
         Ok(c) => c,
         Err(e) => {
@@ -4301,18 +4284,8 @@ async fn resubmit_pending(
         return;
     }
 
-    // A fake transport needs no credentials: it is the transport (P4-U12).
     let smtp_config = match SmtpConfig::load(account) {
         Ok(c) => c,
-        Err(_) if crate::daemon::fake_transport::armed() => SmtpConfig {
-            account: account.name.clone(),
-            host: "fake.invalid".to_string(),
-            port: 465,
-            username: String::new(),
-            password: String::new(),
-            default_from: account.default_from.clone(),
-            accept_invalid_certs: false,
-        },
         Err(e) => {
             log::warn!(
                 "[outbox] {} has {} queued message(s) but no usable SMTP config: {e:#}",
@@ -5021,11 +4994,6 @@ pub fn graph_mime(built: &BuiltMessage) -> Result<Vec<u8>> {
 /// Never called before the message is committed to the outbox: see
 /// [`crate::outbox`] for why the ordering is the whole design.
 pub async fn submit(built: &BuiltMessage, smtp_config: &SmtpConfig) -> Result<SendResult> {
-    // The daemon-side transport fake (P4-U12), which serves the submission in
-    // process and records it. Unset outside a test, and never set on a client.
-    if let Some(fake) = crate::daemon::fake_transport::fake_transport() {
-        return fake.submit(&built.message_id, &built.recipients);
-    }
     // Create SMTP transport (branching on auth method / TLS mode).
     let mailer = build_smtp_transport(smtp_config)?;
     submit_over(built, smtp_config, &mailer).await
@@ -5662,8 +5630,8 @@ fn is_8bitmime_refusal(err: &lettre::transport::smtp::Error) -> bool {
 }
 
 /// The SMTP resume and the durable send against a counting fake transport
-/// (#0063 review of b1952fc4): no server, and no env-armed fake transport
-/// leaking into the tests beside them.
+/// (#0063 review of b1952fc4): no server, and nothing armed from the
+/// environment leaking into the tests beside them.
 #[cfg(test)]
 mod smtp_durability_tests {
     use super::*;

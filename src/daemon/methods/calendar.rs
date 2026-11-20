@@ -2860,7 +2860,7 @@ async fn send_itip(
     method: &str,
     token: &CancelToken,
 ) -> anyhow::Result<Option<ItipSent>> {
-    let smtp = super::send::smtp_config(account)?;
+    let smtp = crate::config::SmtpConfig::load(account)?;
     // No signature: a change carries the invitation, and the first one's
     // body was the user's to sign.
     let built = messages
@@ -2967,7 +2967,7 @@ async fn submit(
     method: &str,
     token: &CancelToken,
 ) -> anyhow::Result<Option<crate::send::RsvpOutcome>> {
-    let smtp = super::send::smtp_config(account)?;
+    let smtp = crate::config::SmtpConfig::load(account)?;
     let prepared = crate::send::prepare_rsvp(
         ics,
         &account.default_from,
