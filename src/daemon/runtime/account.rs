@@ -2173,6 +2173,41 @@ mod tests {
         assert!(runtime.backlog_owed());
     }
 
+    /// A quick tick's body carries the account's body budget and a full
+    /// one's carries none: a full sync is the one that fetches every body,
+    /// and an IMAP quick window never reaches the older ones a cut full pass
+    /// would leave behind.
+    #[tokio::test]
+    async fn only_a_quick_tick_carries_the_body_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = quiet_hooks();
+        hooks.body = {
+            let seen = Arc::clone(&seen);
+            Arc::new(move |ctx: TickContext| {
+                lock(&seen).push((ctx.kind, ctx.body_deadline));
+                async { Ok(()) }.boxed()
+            })
+        };
+        let runtime = AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 9), 1, hooks)
+            .expect("a free lock");
+
+        let quick = runtime.tick(TickKind::Quick).await;
+        let full = runtime.tick(TickKind::Full).await;
+        assert_eq!(
+            *lock(&seen),
+            [
+                (TickKind::Quick, Some(Duration::from_secs(9))),
+                (TickKind::Full, None),
+            ]
+        );
+        assert_eq!(quick.body_deadline, Some(Duration::from_secs(9)));
+        assert_eq!(
+            full.body_deadline, None,
+            "the outcome reports the budget it ran under"
+        );
+    }
+
     /// A body that fails is reported on the outcome, and the tail still ran.
     #[tokio::test]
     async fn a_failing_body_is_carried_and_the_tail_still_runs() {
