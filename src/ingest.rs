@@ -2127,6 +2127,65 @@ pub fn given_up_unwritten(
     read().with_context(|| format!("reading the messages given up on in '{mailbox}'"))
 }
 
+/// Forget the failure rows of `mailbox` whose UID is not in `listed`
+/// (PERSO-334 review): a message the server no longer lists, deleted or moved
+/// elsewhere, is owed nothing, and a row left behind would keep the sync
+/// status saying it is still on the server and asked for again. `listed` is
+/// a whole, trusted listing of the mailbox, which only the caller can vouch
+/// for. Answers how many rows went.
+pub fn forget_unlisted_failures(
+    store: &Store,
+    account: &str,
+    mailbox: &str,
+    listed: &std::collections::HashSet<i64>,
+) -> usize {
+    let forget = || -> rusqlite::Result<usize> {
+        let held: Vec<i64> = store
+            .conn()
+            .prepare("SELECT uid FROM ingest_failures WHERE account = ?1 AND mailbox = ?2")?
+            .query_map(rusqlite::params![account, mailbox], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut gone = 0;
+        for uid in held.into_iter().filter(|uid| !listed.contains(uid)) {
+            gone += store.conn().execute(
+                "DELETE FROM ingest_failures WHERE account = ?1 AND mailbox = ?2 AND uid = ?3",
+                rusqlite::params![account, mailbox, uid],
+            )?;
+        }
+        Ok(gone)
+    };
+    forget().unwrap_or_else(|e| {
+        warn!("Failed to forget the unlisted failures of '{mailbox}': {e}");
+        0
+    })
+}
+
+/// Forget the failure rows of every mailbox of `account` but `kept`, the
+/// mailboxes the account syncs (PERSO-334 review): a folder deleted on the
+/// server or no longer synced is never listed again, so nothing else would
+/// ever drop its rows. Answers how many rows went.
+pub fn forget_failures_outside(store: &Store, account: &str, kept: &[String]) -> usize {
+    let forget = || -> rusqlite::Result<usize> {
+        let held: Vec<String> = store
+            .conn()
+            .prepare("SELECT DISTINCT mailbox FROM ingest_failures WHERE account = ?1")?
+            .query_map([account], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut gone = 0;
+        for mailbox in held.iter().filter(|mailbox| !kept.contains(mailbox)) {
+            gone += store.conn().execute(
+                "DELETE FROM ingest_failures WHERE account = ?1 AND mailbox = ?2",
+                rusqlite::params![account, mailbox],
+            )?;
+        }
+        Ok(gone)
+    };
+    forget().unwrap_or_else(|e| {
+        warn!("Failed to forget the failures of the folders '{account}' lost: {e}");
+        0
+    })
+}
+
 /// How many passes have failed to write `uid`. `0` when nothing is recorded.
 pub fn ingest_failure_attempts(store: &Store, account: &str, mailbox: &str, uid: i64) -> i64 {
     store

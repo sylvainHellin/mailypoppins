@@ -204,6 +204,21 @@ fn record(
     }
     tx.commit().context("committing the folder list")?;
     unreferenced.remove();
+    // A folder the account no longer syncs, deleted on the server or out of
+    // its policy, is never listed again, so its failure rows go with it here,
+    // or the sync status would list its messages for ever (PERSO-334 review).
+    let syncs: Vec<String> = Catalogue::from_store(store, account)
+        .targets()
+        .iter()
+        .map(|target| target.role.as_str().to_string())
+        .collect();
+    let gone = crate::ingest::forget_failures_outside(store, &account.name, &syncs);
+    if gone > 0 {
+        log::info!(
+            "[catalogue] {}: forgot {gone} failed message(s) of folders it no longer syncs",
+            account.name
+        );
+    }
     Ok(recorded.changed)
 }
 

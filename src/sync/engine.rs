@@ -602,6 +602,26 @@ async fn run_pass<B: SyncBackend>(
             coverage: coverage_of,
         } = listing;
         result.skipped += skipped;
+        // What a failure row of this mailbox may still name (PERSO-334
+        // review), when the listing is whole and trusted, the prune's gate: an
+        // IMAP `UID SEARCH ALL` that matched `EXISTS` under an unchanged
+        // UIDVALIDITY, or a Graph enumeration of the whole folder, whose flags
+        // are the folder's every message. A `status-only` folder's window is
+        // its policy, so only its newest `window` UIDs are owed anything.
+        let still_owed: Option<std::collections::HashSet<i64>> = match &observed {
+            Observed::Selected(_) if enumeration_complete && !uidvalidity_reset => Some(
+                listed
+                    .iter()
+                    .rev()
+                    .take(target.window.unwrap_or(usize::MAX))
+                    .copied()
+                    .collect(),
+            ),
+            Observed::Folder { .. } if enumeration_complete => {
+                Some(known_flags.iter().map(|(uid, _)| *uid).collect())
+            }
+            _ => None,
+        };
         // New mail is what lands above the top the mailbox had before this
         // pass (PERSO-186). A mailbox with no cursor yet is all backlog, a
         // UID under the top is older mail a wider pass reached, and a
@@ -950,6 +970,19 @@ async fn run_pass<B: SyncBackend>(
                 return Ok(result);
             }
             continue;
+        }
+
+        // After this pass's own failures were counted, so a UID it failed on
+        // is, by being listed, kept.
+        if let Some(listed) = &still_owed {
+            let gone =
+                ingest::forget_unlisted_failures(store, account, target.role.as_str(), listed);
+            if gone > 0 {
+                info!(
+                    "[sync] '{}': forgot {gone} failed message(s) the server no longer lists",
+                    target.server_name
+                );
+            }
         }
 
         // The degradation above is granted to the pass that detects the reset,
