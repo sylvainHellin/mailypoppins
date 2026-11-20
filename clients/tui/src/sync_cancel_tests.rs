@@ -182,8 +182,38 @@ fn sx_cancels_the_full_sync_this_window_started_and_its_end_says_what_stays() {
     );
 }
 
+/// `ss` while `sS` runs is parked behind it; `sx` then cancels the full sync
+/// and drops the parked quick one, which never starts, since the user asked
+/// the syncing to stop.
+#[test]
+fn sx_cancels_the_running_sync_and_drops_the_one_parked_behind_it() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    press(&mut app, &daemon, "sS");
+    press(&mut app, &daemon, "ss");
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Quick sync queued (waiting for the current sync)")
+    );
+    assert!(app.queued_action.is_some(), "the quick sync is parked");
+
+    press(&mut app, &daemon, "sx");
+    assert!(app.queued_action.is_none(), "the parked sync is dropped");
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Cancelling the sync of work...")
+    );
+    app.apply_event(&cancelled_finish(2));
+    assert_eq!(app.bg_count, 0);
+    assert!(
+        app.queued_action.is_none(),
+        "nothing is left to start once the cancelled sync is over"
+    );
+    assert_eq!(daemon.methods(), ["sync.full", "operation.cancel"]);
+}
+
 /// `sx` with nothing running says so and calls nothing, whatever another
-/// client may be syncing: this window cancels only what it started.
+/// client may be syncing: this window names only what it started.
 #[test]
 fn sx_with_no_sync_of_this_window_running_says_so_and_calls_nothing() {
     let daemon = Daemon::answering(CancelAnswer::Cancelled);
