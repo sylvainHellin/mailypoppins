@@ -5,8 +5,8 @@ import type { GivenUpKind } from "./GivenUpKind";
  * One message the sync has given up on for now (#0074, PERSO-333): listed by
  * the server, never stored, and asked for again later.
  *
- * The mailbox and the UID are all mp knows of it: no row was ever written, so
- * there is no sender or subject to show.
+ * The mailbox and, on IMAP, the UID are all mp knows of it: no row was ever
+ * written, so there is no sender or subject to show.
  */
 export type GivenUpMessage = {
 /**
@@ -15,10 +15,12 @@ export type GivenUpMessage = {
  */
 mailbox: string,
 /**
- * The UID the server lists it under, a Graph message's synthetic one on
- * a Graph account.
+ * The UID the IMAP server lists it under; `null` for a Graph message,
+ * whose store key is a 63-bit hash of its Message-ID that means nothing
+ * to a user and that a JavaScript number cannot hold. A Graph `reason`
+ * names the Message-ID instead.
  */
-uid: number,
+uid: number | null,
 /**
  * Why it is not in the store.
  */
@@ -29,7 +31,9 @@ kind: GivenUpKind,
  */
 reason: string,
 /**
- * When mp asks the server for it again, RFC 3339 with the daemon's
- * offset; `null` where every sync asks again (a Graph account).
+ * When mp asks the IMAP server for it again, RFC 3339 with the daemon's
+ * offset. `null` for a Graph message, which only a full sync from the
+ * TUI or the desktop app asks for again: a quick pass on a delta token
+ * walks the changed messages only, and an unchanged message is none.
  */
 retry_at: string | null, };

@@ -127,24 +127,29 @@ pub struct SyncCompleted {
 /// One message the sync has given up on for now (#0074, PERSO-333): listed by
 /// the server, never stored, and asked for again later.
 ///
-/// The mailbox and the UID are all mp knows of it: no row was ever written, so
-/// there is no sender or subject to show.
+/// The mailbox and, on IMAP, the UID are all mp knows of it: no row was ever
+/// written, so there is no sender or subject to show.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct GivenUpMessage {
     /// The mailbox's store key, the selector segment and the sidebar's slug
     /// (`inbox`, `archive`, a server folder name).
     pub mailbox: String,
-    /// The UID the server lists it under, a Graph message's synthetic one on
-    /// a Graph account.
-    pub uid: u64,
+    /// The UID the IMAP server lists it under; `null` for a Graph message,
+    /// whose store key is a 63-bit hash of its Message-ID that means nothing
+    /// to a user and that a JavaScript number cannot hold. A Graph `reason`
+    /// names the Message-ID instead.
+    #[serde(default)]
+    pub uid: Option<u32>,
     /// Why it is not in the store.
     pub kind: GivenUpKind,
     /// The server's own words for a refusal, mp's reason for a message it
     /// could not store.
     pub reason: String,
-    /// When mp asks the server for it again, RFC 3339 with the daemon's
-    /// offset; `null` where every sync asks again (a Graph account).
+    /// When mp asks the IMAP server for it again, RFC 3339 with the daemon's
+    /// offset. `null` for a Graph message, which only a full sync from the
+    /// TUI or the desktop app asks for again: a quick pass on a delta token
+    /// walks the changed messages only, and an unchanged message is none.
     #[serde(default)]
     pub retry_at: Option<String>,
 }
@@ -542,7 +547,7 @@ mod tests {
 
         tick.given_up.push(GivenUpMessage {
             mailbox: "inbox".to_string(),
-            uid: 3,
+            uid: Some(3),
             kind: GivenUpKind::Refused,
             reason: "the server answered NO: Some messages could not be FETCHed".to_string(),
             retry_at: Some("2026-11-21T10:00:00+01:00".to_string()),

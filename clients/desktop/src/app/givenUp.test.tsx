@@ -83,7 +83,7 @@ describe("messages given up on", () => {
     expect(givenUpSentence(refused, new Date("2026-11-22T00:00:00+01:00"))).toMatch(/; mp asks again on the next sync$/);
     // A Graph message (PERSO-334 review): no UID worth showing, and only a
     // full sync asks for it again.
-    expect(givenUpSentence({ ...refused, uid: 2 ** 62, kind: "unwritable", reason: "store refused", retry_at: null }, now)).toBe(
+    expect(givenUpSentence({ ...refused, uid: null, kind: "unwritable", reason: "store refused", retry_at: null }, now)).toBe(
       "inbox: mp could not store a message (store refused); mp asks again on a full sync from the TUI or the desktop app",
     );
     expect(givenUpHeadline(1)).toBe("1 message could not be downloaded; it is still on the server, nothing is lost");

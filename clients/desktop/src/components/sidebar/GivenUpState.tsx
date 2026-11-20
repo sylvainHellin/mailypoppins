@@ -21,8 +21,9 @@ export function GivenUpState({ account, givenUp }: { account: string; givenUp: G
         </summary>
         <p className="mt-1 text-muted-foreground">{givenUpHeadline(count)}.</p>
         <ul className="mt-1 space-y-1 text-muted-foreground">
-          {givenUp.map((m) => (
-            <li key={`${m.mailbox}/${m.uid}`}>{givenUpSentence(m, now)}.</li>
+          {/* By position: the list is replaced whole, and a Graph entry has no UID. */}
+          {givenUp.map((m, i) => (
+            <li key={i}>{givenUpSentence(m, now)}.</li>
           ))}
         </ul>
       </details>

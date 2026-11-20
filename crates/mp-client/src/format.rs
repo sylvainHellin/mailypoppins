@@ -192,42 +192,33 @@ pub fn given_up_brief(
     now: chrono::DateTime<chrono::Local>,
 ) -> String {
     use mp_protocol::events::GivenUpKind;
-    let why = match message.kind {
-        GivenUpKind::Refused => message.reason.clone(),
-        GivenUpKind::Unwritable => format!("mp could not store it: {}", message.reason),
-    };
-    let retry = match message
-        .retry_at
-        .as_deref()
-        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-    {
-        Some(at) if at > now => format!(
-            "mp asks again {}",
-            at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+    // The short form names the minute alone, "mp asks again 2026-11-21 10:00".
+    let retry = given_up_retry(message, now).replacen("again after ", "again ", 1);
+    match (message.uid, message.kind) {
+        (Some(uid), GivenUpKind::Refused) => format!(
+            "{} UID {uid}, still on the server: {}. {retry}.",
+            message.mailbox, message.reason
         ),
-        Some(_) => "mp asks again on the next sync".to_string(),
-        None => "mp asks again on every sync".to_string(),
-    };
-    format!(
-        "{} UID {}, still on the server: {why}. {retry}.",
-        message.mailbox, message.uid
-    )
+        (Some(uid), GivenUpKind::Unwritable) => format!(
+            "{} UID {uid}, still on the server: mp could not store it: {}. {retry}.",
+            message.mailbox, message.reason
+        ),
+        (None, _) => format!(
+            "{}, still on the server: mp could not store a message: {}. {retry}.",
+            message.mailbox, message.reason
+        ),
+    }
 }
 
-/// One message the sync has given up on, as a sentence for a reader who never
-/// saw the code: which message (the mailbox and the UID are all mp knows of
-/// it), why it is not here, in the server's words for a refusal, and when mp
-/// tries again. `now` decides whether that retry is still to come.
-pub fn given_up_sentence(
+/// When mp asks the server again for a message it gave up on: the local
+/// minute of an IMAP retry still to come, the next sync once it is due, and a
+/// full sync for a Graph message, which no quick pass on a delta token
+/// reaches (PERSO-334 review).
+fn given_up_retry(
     message: &mp_protocol::events::GivenUpMessage,
     now: chrono::DateTime<chrono::Local>,
 ) -> String {
-    use mp_protocol::events::GivenUpKind;
-    let why = match message.kind {
-        GivenUpKind::Refused => format!("the server refuses to send it ({})", message.reason),
-        GivenUpKind::Unwritable => format!("mp could not store it ({})", message.reason),
-    };
-    let retry = match message
+    match message
         .retry_at
         .as_deref()
         .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
@@ -237,11 +228,34 @@ pub fn given_up_sentence(
             at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
         ),
         Some(_) => "mp asks again on the next sync".to_string(),
-        None => "mp asks again on every sync".to_string(),
+        None => "mp asks again on a full sync from the TUI or the desktop app".to_string(),
+    }
+}
+
+/// One message the sync has given up on, as a sentence for a reader who never
+/// saw the code: which message (the mailbox and the IMAP UID are all mp knows
+/// of it; a Graph message's reason names its Message-ID), why it is not here,
+/// in the server's words for a refusal, and when mp tries again. `now`
+/// decides whether that retry is still to come.
+pub fn given_up_sentence(
+    message: &mp_protocol::events::GivenUpMessage,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    use mp_protocol::events::GivenUpKind;
+    let retry = given_up_retry(message, now);
+    let Some(uid) = message.uid else {
+        return format!(
+            "{}: mp could not store a message ({}); {retry}",
+            message.mailbox, message.reason
+        );
+    };
+    let why = match message.kind {
+        GivenUpKind::Refused => format!("the server refuses to send it ({})", message.reason),
+        GivenUpKind::Unwritable => format!("mp could not store it ({})", message.reason),
     };
     format!(
-        "{}, UID {} (mp knows it only by its mailbox and number): {why}; {retry}",
-        message.mailbox, message.uid
+        "{}, UID {uid} (mp knows it only by its mailbox and number): {why}; {retry}",
+        message.mailbox
     )
 }
 
@@ -718,7 +732,7 @@ mod given_up_tests {
     fn message(kind: GivenUpKind, retry_at: Option<&str>) -> GivenUpMessage {
         GivenUpMessage {
             mailbox: "inbox".to_string(),
-            uid: 3,
+            uid: Some(3),
             kind,
             reason: "the server answered NO: [UNAVAILABLE] try later".to_string(),
             retry_at: retry_at.map(str::to_string),
@@ -753,7 +767,7 @@ mod given_up_tests {
         // a full sync asks for it again, since a pass on a delta token walks
         // the changed messages only.
         let graph_message = GivenUpMessage {
-            uid: 1 << 62,
+            uid: None,
             ..message(GivenUpKind::Unwritable, None)
         };
         let graph = given_up_sentence(&graph_message, now);

@@ -1895,8 +1895,8 @@ const REFUSED_PREFIX: &str = "the server refused to send it: ";
 /// row for, by mailbox and UID: the list the sync status shows (PERSO-334).
 ///
 /// An IMAP UID's retry is [`GIVEN_UP_RETRY_SECS`] after its last attempt; a
-/// UID no IMAP server issues is a Graph message, which every sync asks for
-/// again, so it has none. A store that cannot answer lists nothing, and says
+/// UID no IMAP server issues is a Graph message's hash, which is not shown
+/// and has no retry time: only a full sync asks for it again. A store that cannot answer lists nothing, and says
 /// so in the log: the status is a report, and the next tick reads it again.
 pub fn given_up_report(
     store: &Store,
@@ -1931,7 +1931,8 @@ pub fn given_up_report(
                 Some(words) => (GivenUpKind::Refused, words.to_string()),
                 None => (GivenUpKind::Unwritable, error.clone()),
             };
-            let retry_at = u32::try_from(uid).ok().map(|_| {
+            let imap_uid = u32::try_from(uid).ok();
+            let retry_at = imap_uid.map(|_| {
                 let at = updated.unwrap_or(now) + GIVEN_UP_RETRY_SECS;
                 chrono::DateTime::from_timestamp(at, 0)
                     .map(|utc| utc.with_timezone(&chrono::Local).to_rfc3339())
@@ -1939,7 +1940,7 @@ pub fn given_up_report(
             });
             GivenUpMessage {
                 mailbox,
-                uid: u64::try_from(uid).unwrap_or_default(),
+                uid: imap_uid,
                 kind,
                 reason,
                 retry_at,

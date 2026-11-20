@@ -1469,7 +1469,7 @@ mod tests {
         let state = state();
         let given_up = vec![mp_protocol::events::GivenUpMessage {
             mailbox: "inbox".to_string(),
-            uid: 3,
+            uid: Some(3),
             kind: mp_protocol::events::GivenUpKind::Refused,
             reason: "the server answered NO: Some messages could not be FETCHed".to_string(),
             retry_at: Some("2026-11-21T10:00:00+01:00".to_string()),

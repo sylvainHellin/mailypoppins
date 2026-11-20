@@ -500,7 +500,7 @@ mod tests {
         let retry = chrono::Local::now() + chrono::Duration::hours(20);
         acct.given_up = vec![mp_protocol::events::GivenUpMessage {
             mailbox: "inbox".to_string(),
-            uid: 3,
+            uid: Some(3),
             kind: mp_protocol::events::GivenUpKind::Refused,
             reason: "the server answered NO: Some messages could not be FETCHed".to_string(),
             retry_at: Some(retry.to_rfc3339()),

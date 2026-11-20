@@ -46,18 +46,25 @@ function localMinute(at: Date): string {
 }
 
 /**
+ * When mp asks the server again: the local minute of an IMAP retry still to
+ * come, the next sync once it is due, and a full sync for a Graph message,
+ * which no quick pass on a delta token reaches (PERSO-334 review).
+ */
+function retryText(m: GivenUpMessage, now: Date): string {
+  const at = m.retry_at ? new Date(m.retry_at) : null;
+  if (at === null || Number.isNaN(at.getTime())) return "mp asks again on a full sync from the TUI or the desktop app";
+  return at > now ? `mp asks again after ${localMinute(at)}` : "mp asks again on the next sync";
+}
+
+/**
  * One message as a sentence for a reader who never saw the code: which
- * message (its mailbox and UID are all mp knows of it), why it is not here,
- * in the server's words for a refusal, and when mp asks again.
+ * message (its mailbox and IMAP UID are all mp knows of it; a Graph
+ * message's reason names its Message-ID), why it is not here, in the
+ * server's words for a refusal, and when mp asks again.
  */
 export function givenUpSentence(m: GivenUpMessage, now: Date = new Date()): string {
+  const retry = retryText(m, now);
+  if (m.uid === null || m.uid === undefined) return `${m.mailbox}: mp could not store a message (${m.reason}); ${retry}`;
   const why = m.kind === "refused" ? `the server refuses to send it (${m.reason})` : `mp could not store it (${m.reason})`;
-  const at = m.retry_at ? new Date(m.retry_at) : null;
-  const retry =
-    at === null || Number.isNaN(at.getTime())
-      ? "mp asks again on every sync"
-      : at > now
-        ? `mp asks again after ${localMinute(at)}`
-        : "mp asks again on the next sync";
   return `${m.mailbox}, UID ${m.uid} (mp knows it only by its mailbox and number): ${why}; ${retry}`;
 }
