@@ -2187,6 +2187,26 @@ mod wire {
         );
     }
 
+    /// `mp sync -n 150` asks for more than the usual quick tick takes, so its
+    /// tick downloads all of it, as the full sync does, and does not stop at
+    /// the account's body-fetch deadline the way the scheduler's quick tick
+    /// does: here one second, against a server that answers each batch of 20
+    /// bodies in 400 ms.
+    #[test]
+    fn mp_sync_n_above_the_usual_bound_is_not_cut_at_the_fetch_deadline() {
+        let mut wire = WireRoot::new();
+        wire.write_config("body_fetch_deadline_secs = 1");
+        wire.imap.set_mail(INBOX, 11, numbered(150));
+        wire.start(&[]);
+        wire.imap
+            .set_body_delay(std::time::Duration::from_millis(400));
+
+        let out = wire.mp(&["sync", "-n", "150"]);
+        assert_ok(&out, "mp sync -n 150");
+        assert_eq!(stdout(&out), "✓ Synced: 150 email(s) ingested\n");
+        assert_eq!(wire.local("inbox").len(), 150);
+    }
+
     /// `count` messages for a folder, on UIDs 1 to `count`.
     fn numbered(count: u32) -> Vec<(u32, Vec<u8>)> {
         (1..=count)
