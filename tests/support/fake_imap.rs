@@ -450,6 +450,16 @@ impl RejectingImapServer {
         }
     }
 
+    /// Stop serving the folder `name`, as a server whose folder another
+    /// client deleted: `LIST` no longer names it.
+    pub fn remove_folder(&self, name: &str) {
+        self.shared
+            .mailboxes
+            .lock()
+            .expect("the folders")
+            .retain(|mailbox| mailbox.name != name);
+    }
+
     /// Set the flags of the message `uid` of `name`, as another client
     /// would.
     pub fn set_flags(&self, name: &str, uid: u32, flags: &[&str]) {

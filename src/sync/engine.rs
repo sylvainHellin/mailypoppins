@@ -2817,6 +2817,39 @@ mod tests {
         );
     }
 
+    /// PERSO-334 review: a failure row whose UID the server still lists stays,
+    /// and one whose UID has slid below a `status-only` folder's window goes:
+    /// no pass asks for it again there, by that folder's policy, so the sync
+    /// status may not say mp will.
+    #[test]
+    fn a_failure_row_below_a_status_only_window_is_forgotten() {
+        for (window, kept) in [(None, 1), (Some(1), 0)] {
+            let fx = Fixture::new();
+            let targets = vec![SyncTarget {
+                window,
+                ..SyncTarget::new(MailboxRole::Inbox, "INBOX")
+            }];
+            let mut backend = FakeBackend::default();
+            let mut later = fetch(vec![(106, raw("six"))]);
+            later.listed = vec![105, 106];
+            backend.script(
+                "INBOX",
+                vec![Ok(fetch(vec![(105, unparsable())])), Ok(later)],
+            );
+            fx.run(&mut backend, &targets);
+            assert_eq!(
+                ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),
+                1
+            );
+            fx.run(&mut backend, &targets);
+            assert_eq!(
+                ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),
+                kept,
+                "window {window:?}"
+            );
+        }
+    }
+
     /// #0074 review, through the loop: a UIDVALIDITY reset clears the mailbox's
     /// failure counts, because they are keyed by UID and the server has just
     /// renumbered them. The message that lands on the recycled UID gets its

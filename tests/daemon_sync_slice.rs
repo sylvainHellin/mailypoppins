@@ -2306,6 +2306,79 @@ mod wire {
         );
     }
 
+    /// PERSO-334 review: a message given up on that the server then expunges
+    /// (deleted or moved in webmail) is listed no more, and its failure row
+    /// goes on the first pass whose listing of the mailbox is whole.
+    #[test]
+    fn a_message_given_up_on_and_then_expunged_is_listed_no_more() {
+        let wire = refusing_an_arrival();
+        for _ in 0..3 {
+            half_an_hour_later(&wire);
+            wire.sync();
+        }
+        assert_eq!(attempts(&wire, 3), 3);
+
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![
+                (2, mail("second", "bob@example.org", "Second", "two")),
+                (4, mail("fourth", "di@example.org", "Fourth", "four")),
+            ],
+        );
+        let out = stdout(&wire.sync());
+        assert!(!out.contains("could not be downloaded"), "{out}");
+        assert_eq!(attempts(&wire, 3), 0, "its failure row is gone");
+    }
+
+    /// The failure rows the store holds outside the INBOX, `(mailbox, uid)`.
+    fn failures_elsewhere(wire: &WireRoot) -> Vec<(String, i64)> {
+        let store = wire.store();
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT mailbox, uid FROM ingest_failures WHERE mailbox <> 'inbox'")
+            .expect("the query");
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("the rows")
+            .collect::<Result<_, _>>()
+            .expect("the rows read")
+    }
+
+    /// PERSO-334 review: a message given up on in a folder the account then
+    /// loses (deleted on the server) is listed no more once the folder list
+    /// is read again, and its failure row goes with the folder.
+    #[test]
+    fn a_message_given_up_on_in_a_folder_the_server_drops_is_listed_no_more() {
+        let mut wire = WireRoot::new();
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![(1, mail("first", "ada@example.org", "First", "one"))],
+        );
+        wire.imap.set_mail(
+            "Projects",
+            21,
+            vec![(7, mail("seventh", "gus@example.org", "Seventh", "seven"))],
+        );
+        wire.imap.refuse_fetch_of(7, Some(NOT_FETCHED));
+        wire.start(&[]);
+        let mut out = String::new();
+        for _ in 0..3 {
+            half_an_hour_later(&wire);
+            out = stdout(&wire.sync());
+        }
+        assert_eq!(failures_elsewhere(&wire).len(), 1, "{out}");
+        assert!(out.contains(", UID 7 ("), "{out}");
+
+        // The folder list is read on a runtime's first tick.
+        wire.imap.remove_folder("Projects");
+        wire.stop();
+        wire.start(&[]);
+        let out = stdout(&wire.sync());
+        assert!(!out.contains("could not be downloaded"), "{out}");
+        assert!(failures_elsewhere(&wire).is_empty());
+    }
+
     /// A message given up on is asked for again once a day has passed since
     /// it was last refused (a refusal can be transient), and ingested
     /// normally when the server then sends it, its count cleared.
