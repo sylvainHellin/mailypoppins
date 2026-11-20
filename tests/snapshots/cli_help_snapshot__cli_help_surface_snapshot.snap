@@ -1896,7 +1896,7 @@ Usage: mp daemon install-service [OPTIONS]
 
 Options:
       --force           Replace a service file whose content differs from this version's
-      --check           Report whether a service is installed, and write nothing
+      --check           Report whether a service is installed and is the file this version writes, and write nothing
       --profile <NAME>  Profile to run on, with its own config, data and daemon (default: $MAILYPOPPINS_PROFILE, else the default profile)
   -h, --help            Print help
 
