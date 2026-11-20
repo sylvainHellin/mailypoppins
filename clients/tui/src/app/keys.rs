@@ -950,6 +950,10 @@ impl App {
                 self.pending_prefix = None;
                 self.push_action(Action::Sync);
             }
+            A::CancelSync => {
+                self.pending_prefix = None;
+                self.push_action(Action::CancelSync);
+            }
             A::ServerSearch => {
                 self.pending_prefix = None;
                 self.search_form = crate::app::SearchForm::default();

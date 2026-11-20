@@ -360,6 +360,15 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
             rolled_back,
         } => land_sync(app, account_index, result, rolled_back),
 
+        // What the pass ingested before it stopped reaches the sidebar and
+        // the open list as the daemon's counts invalidations (PERSO-133), so
+        // nothing is reloaded here, and the account's sync health is left as
+        // the last pass that ended left it.
+        BgResult::SyncCancelled { account } => app.set_status_level(
+            mp_client::format::sync_cancelled_line(&account),
+            StatusLevel::Warning,
+        ),
+
         BgResult::Sync {
             account_index,
             result,

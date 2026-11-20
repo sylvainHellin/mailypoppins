@@ -372,6 +372,8 @@ pub enum KeyAction {
     NewDraft,
     QuickSync,
     FullSync,
+    /// `sx`: cancel the sync this window started (PERSO-321).
+    CancelSync,
     ServerSearch,
     // -- Contacts view (#0033) -------------------------------------------
     ContactsDown,
@@ -889,6 +891,15 @@ pub static KEYMAP: &[KeyBinding] = &[
         KeyCtx::Global,
         KeyAction::FullSync,
         "Full sync",
+        false,
+    ),
+    p(
+        "sx",
+        Chord::Char('x'),
+        's',
+        KeyCtx::Global,
+        KeyAction::CancelSync,
+        "Cancel the running sync",
         false,
     ),
     p(
@@ -2573,8 +2584,12 @@ mod tests {
         );
         // Strict prefix: a flat key does not fire while a prefix is pending, so
         // `s` then `x` cannot send (the accidental-destructive case #0092
-        // guards against).
-        assert_eq!(resolve(KeyCtx::Global, key('x'), Some('s'), &allow), None);
+        // guards against); it is the sync family's own `sx`, which cancels
+        // the running sync (PERSO-321).
+        assert_eq!(
+            resolve(KeyCtx::Global, key('x'), Some('s'), &allow),
+            Some(KeyAction::CancelSync)
+        );
         // Same in the Calendar pane context (#0034), which owns `gg`/`G` too.
         assert_eq!(resolve(KeyCtx::Calendar, key('g'), Some(' '), &allow), None);
         assert_eq!(

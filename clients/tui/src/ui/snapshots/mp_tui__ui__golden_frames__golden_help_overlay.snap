@@ -29,23 +29,24 @@ expression: "frame_snapshot(&mut app, WIDTH, HEIGHT)"
 23 |││                                 │  ga          Switch account                    │                                 ││
 24 |││                                 │  ss          Quick sync                        │                                 ││
 25 |││                                 │  sS          Full sync                         │                                 ││
-26 |│╰─────────────────────────────────│  sl          Activity log overlay              │                                 ││
-27 |│╭ Activity ───────────────────────│  sc          Open config.toml in $EDITOR       │                                 ││
-28 |││  No activity yet                │  sf          Open log file in $EDITOR          │                                 ││
-29 |││                                 │  sb          Blocked senders (unblock one)     │                                 ││
-30 |││                                 │  Space m     Switch to Mail view               │                                 ││
-31 |││                                 │  Space c     Switch to Contacts view           │                                 ││
-32 |│╰─────────────────────────────────│  Space a     Switch to Calendar view           │                                 ││
-33 |│╭ View ───────────────────────────│                                                │                                 ││
-34 |││    mail  |  contacts  |  calenda│  MESSAGE (list, headers, body)                 │                                 ││
-35 |│╰─────────────────────────────────│  J / K       Next / previous message           │─────────────────────────────────╯│
-36 |│╭─────────────────────────────────│  Enter       Read (focus the body pane)        │─────────────────────────────────╮│
-37 |││ HELP                            ╰─────────────────── 1-34/164 ───────────────────╯                                 ││
+26 |│╰─────────────────────────────────│  sx          Cancel the running sync           │                                 ││
+27 |│╭ Activity ───────────────────────│  sl          Activity log overlay              │                                 ││
+28 |││  No activity yet                │  sc          Open config.toml in $EDITOR       │                                 ││
+29 |││                                 │  sf          Open log file in $EDITOR          │                                 ││
+30 |││                                 │  sb          Blocked senders (unblock one)     │                                 ││
+31 |││                                 │  Space m     Switch to Mail view               │                                 ││
+32 |│╰─────────────────────────────────│  Space c     Switch to Contacts view           │                                 ││
+33 |│╭ View ───────────────────────────│  Space a     Switch to Calendar view           │                                 ││
+34 |││    mail  |  contacts  |  calenda│                                                │                                 ││
+35 |│╰─────────────────────────────────│  MESSAGE (list, headers, body)                 │─────────────────────────────────╯│
+36 |│╭─────────────────────────────────│  J / K       Next / previous message           │─────────────────────────────────╮│
+37 |││ HELP                            ╰─────────────────── 1-34/165 ───────────────────╯                                 ││
 38 |│╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│
 39 |╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 == style runs (col ranges are half-open; rows with no meaning-carrying style are omitted) ==
 03 |bold@36..44
 10 |bg:surface+fg:selection+bold@2..35
 12 |bold@2..35
-34 |bold@5..11 bold@36..67
+34 |bold@5..11
+35 |bold@36..67
 37 |bold@2..8

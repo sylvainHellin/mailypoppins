@@ -1138,6 +1138,12 @@ pub enum BgResult {
         /// As [`BgResult::Fetch`]'s.
         rolled_back: u64,
     },
+    /// A quick or a full pass this window started settled `cancelled`
+    /// (PERSO-321): no outcome, and no failure of the account's sync.
+    SyncCancelled {
+        /// The account's name, which the line names.
+        account: String,
+    },
     Send {
         account_index: usize,
         result: Result<String, String>,
@@ -2206,6 +2212,9 @@ pub enum Action {
     /// startup auto-fetch (#0001).
     FetchAccount(usize),
     Sync,
+    /// `sx`: cancel the syncs this window started and still waits for, and
+    /// drop one parked behind them (PERSO-321).
+    CancelSync,
     ServerSearch {
         /// The already-parsed AST the form (or the overlay's raw line) built,
         /// so the lowering path renders it without re-parsing (#0086b).
@@ -2422,6 +2431,7 @@ impl Action {
             | Action::LoadMailbox { .. }
             | Action::FetchAccount(_)
             | Action::Sync
+            | Action::CancelSync
             | Action::ServerSearch { .. }
             | Action::SearchResultJump
             | Action::SearchResultYankPath

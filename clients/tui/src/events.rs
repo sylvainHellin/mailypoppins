@@ -299,6 +299,24 @@ impl EventState {
         self.started.contains_key(id)
     }
 
+    /// The quick and full passes this client started and has not seen
+    /// finish, as `(operation id, account)` in id order: what `sx` cancels
+    /// (PERSO-321).
+    pub(super) fn running_passes(&self) -> Vec<(String, String)> {
+        let mut passes: Vec<(String, String)> = self
+            .started
+            .iter()
+            .filter_map(|(id, awaited)| match awaited {
+                Awaited::Quick { account, .. } | Awaited::Full { account, .. } => {
+                    Some((id.clone(), account.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        passes.sort();
+        passes
+    }
+
     /// Whether a pass over `account` is one this client asked for.
     fn awaits_a_pass_on(&self, account: &str) -> bool {
         self.started.values().any(|awaited| match awaited {

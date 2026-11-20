@@ -24,6 +24,7 @@
       { "key": "ga", "action": "Switch account" },
       { "key": "ss", "action": "Quick sync" },
       { "key": "sS", "action": "Full sync" },
+      { "key": "sx", "action": "Cancel the running sync" },
       { "key": "sl", "action": "Activity log overlay" },
       { "key": "sc", "action": "Open config.toml in $EDITOR" },
       { "key": "sf", "action": "Open log file in $EDITOR" },

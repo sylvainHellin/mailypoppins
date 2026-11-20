@@ -145,6 +145,7 @@ pub fn route(action: &Action) -> ActionRoute {
             "draft.list",
         ]),
         Action::Sync => ActionRoute::Daemon(&["sync.full"]),
+        Action::CancelSync => ActionRoute::Daemon(&["operation.cancel"]),
         // The local pass first, then the server leg (LST-08).
         Action::ServerSearch { .. } => {
             ActionRoute::Daemon(&["message.search", "message.search_server"])
@@ -339,6 +340,10 @@ pub fn dispatch(app: &mut App, commands: &dyn Queries, action: &Action) -> bool 
             start_pass(app, commands, "sync.full", "Full sync", Action::Sync);
             true
         }
+        Action::CancelSync => {
+            cancel_syncs(app, commands);
+            true
+        }
         Action::FetchAccount(index) => {
             start_account_pass(app, commands, *index);
             true
@@ -475,6 +480,15 @@ pub(super) fn start_operation_id(
 /// arms already knew how to present, so nothing above this changed when the
 /// poll went away.
 pub fn settled(awaited: &Awaited, payload: &Value) -> BgResult {
+    // A cancelled pass has no outcome and is no failure of the account's
+    // sync: it ends on the line that says what stays (PERSO-321).
+    if payload["state"].as_str() == Some("cancelled") {
+        if let Awaited::Quick { account, .. } | Awaited::Full { account, .. } = awaited {
+            return BgResult::SyncCancelled {
+                account: account.clone(),
+            };
+        }
+    }
     let result = match payload["state"].as_str() {
         Some("succeeded") => Ok(payload["result"].clone()),
         _ => Err(operation_error(payload)),
@@ -607,6 +621,48 @@ fn operation_error(payload: &Value) -> String {
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| "the operation stopped without saying why".to_string())
+}
+
+/// `sx`: `operation.cancel` for every pass this window started and still
+/// waits for, the call `mp sync`'s `^C` and the desktop's Cancel make
+/// (PERSO-321).
+///
+/// A sync parked behind them is dropped too: the user asked for the syncing
+/// to stop, and a parked pass that started as soon as the running one ended
+/// would undo that. The cancelled finish ends the line ([`settled`]); a
+/// cancel the daemon answers too late says nothing was cancelled, since that
+/// pass's own end has said how it went or is about to. Another client's sync
+/// is not this window's to stop, so with none of its own running the key says
+/// so.
+fn cancel_syncs(app: &mut App, commands: &dyn Queries) {
+    let parked = matches!(app.queued_action, Some(Action::Fetch | Action::Sync));
+    if parked {
+        app.queued_action = None;
+    }
+    let running = app.events.running_passes();
+    if running.is_empty() {
+        let line = if parked {
+            "Queued sync dropped"
+        } else {
+            "No sync to cancel: none started from this window is running"
+        };
+        return app.set_status(line.to_string());
+    }
+    for (id, account) in running {
+        match commands.call("operation.cancel", json!({"operation_id": id})) {
+            Ok(_) => app.set_status_level(
+                format!("Cancelling the sync of {account}..."),
+                StatusLevel::Progress,
+            ),
+            Err(e)
+                if mp_client::session::refusal(&e)
+                    .is_some_and(mp_client::operation::cancel_came_too_late) =>
+            {
+                app.set_status(mp_client::format::sync_cancel_too_late_line(&account));
+            }
+            Err(e) => app.set_status_level(format!("operation.cancel: {e:#}"), StatusLevel::Error),
+        }
+    }
 }
 
 /// One of the two passes over the active account, as its key issues it.

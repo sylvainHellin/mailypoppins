@@ -335,6 +335,11 @@ const ACTION_ROUTING: &[(&str, ActionRoute, bool)] = &[
     ("FetchAccount", ActionRoute::Daemon(&["sync.quick"]), false),
     ("Sync", ActionRoute::Daemon(&["sync.full"]), false),
     (
+        "CancelSync",
+        ActionRoute::Daemon(&["operation.cancel"]),
+        false,
+    ),
+    (
         "ServerSearch",
         // The local pass first, then the server leg (LST-08).
         ActionRoute::Daemon(&["message.search", "message.search_server"]),
@@ -524,6 +529,7 @@ fn one_of_each_action() -> Vec<Action> {
         },
         Action::FetchAccount(0),
         Action::Sync,
+        Action::CancelSync,
         Action::ServerSearch {
             query: crate::search::Query::default(),
             targets: None,
@@ -653,6 +659,7 @@ fn variant_name(action: &Action) -> &'static str {
         Action::LoadMailbox { .. } => "LoadMailbox",
         Action::FetchAccount(_) => "FetchAccount",
         Action::Sync => "Sync",
+        Action::CancelSync => "CancelSync",
         Action::ServerSearch { .. } => "ServerSearch",
         Action::SearchResultOpen => "SearchResultOpen",
         Action::SearchResultJump => "SearchResultJump",
