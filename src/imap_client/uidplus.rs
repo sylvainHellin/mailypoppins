@@ -77,7 +77,11 @@ where
         .await?;
     let mut sent = false;
     loop {
-        let Some(response) = session.read_response().await? else {
+        let Some(response) = session
+            .read_response()
+            .await
+            .map_err(super::words::in_server_words)?
+        else {
             bail!("the connection closed during the APPEND to '{mailbox}'");
         };
         match response.parsed() {

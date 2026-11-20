@@ -6,6 +6,7 @@ use async_imap::extensions::idle::IdleResponse;
 use log::{info, warn};
 
 use super::open_imap_session;
+use super::words::in_server_words;
 use crate::config::ImapConfig;
 use crate::sync::MailboxState;
 
@@ -71,10 +72,10 @@ pub async fn watch_mailbox_since(
     let exit_code = match timeout {
         None => {
             let mut handle = session.idle();
-            handle.init().await?;
+            handle.init().await.map_err(in_server_words)?;
             let (fut, _stop) = handle.wait_with_timeout(std::time::Duration::from_secs(29 * 60));
-            let response = fut.await?;
-            session = handle.done().await?;
+            let response = fut.await.map_err(in_server_words)?;
+            session = handle.done().await.map_err(in_server_words)?;
 
             match response {
                 IdleResponse::NewData(_) => 0,
@@ -95,10 +96,10 @@ pub async fn watch_mailbox_since(
                 let wait_duration = idle_interval.min(remaining);
 
                 let mut handle = session.idle();
-                handle.init().await?;
+                handle.init().await.map_err(in_server_words)?;
                 let (fut, _stop) = handle.wait_with_timeout(wait_duration);
-                let response = fut.await?;
-                session = handle.done().await?;
+                let response = fut.await.map_err(in_server_words)?;
+                session = handle.done().await.map_err(in_server_words)?;
 
                 match response {
                     IdleResponse::NewData(_) => break 0,

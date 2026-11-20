@@ -14,7 +14,9 @@
 //! The commands [`super::checked`] sends build the refusal with
 //! [`refusal_text`] directly; the ones `async-imap` sends itself (`SELECT`,
 //! `EXAMINE`, `COPY`, `STATUS`) carry the `Debug` form, which
-//! [`server_words`] takes apart. The LOGIN refusal is left as it is:
+//! [`server_words`] takes apart. An answer `async-imap`'s parser cannot read
+//! at all reaches mp as an I/O error carrying the parser's input as byte
+//! values; [`server_words`] gives the server's text instead (PERSO-323). The LOGIN refusal is left as it is:
 //! [`super::is_rejection`] and the health line read its raw form.
 
 use async_imap::error::Error;
@@ -56,14 +58,44 @@ fn atom_of(debug: &str) -> String {
 }
 
 /// `err` for a user: a `NO` or `BAD` as the server's own words after
-/// `the server answered NO: ` (or `BAD`), anything else as `async-imap`
-/// says it.
+/// `the server answered NO: ` (or `BAD`), an answer the parser could not
+/// read as the server's text ([`unread_answer`]), anything else as
+/// `async-imap` says it.
 pub(crate) fn server_words(err: &Error) -> String {
     match err {
         Error::No(answer) => format!("the server answered NO: {}", answer_text(answer)),
         Error::Bad(answer) => format!("the server answered BAD: {}", answer_text(answer)),
+        Error::Io(io) => match unread_answer(&io.to_string()) {
+            Some(text) => format!("the server sent an answer mp cannot read: {text:?}"),
+            None => err.to_string(),
+        },
         other => other.to_string(),
     }
+}
+
+/// `err` as an error in [`server_words`]' words, for the `?` on a read of the
+/// server's answer that would otherwise carry `async-imap`'s own rendering:
+/// an [`Error`], or the bare I/O error `read_response` answers with.
+pub(crate) fn in_server_words(err: impl Into<Error>) -> anyhow::Error {
+    anyhow::anyhow!(server_words(&err.into()))
+}
+
+/// The server's text in the I/O error `async-imap` makes of an answer its
+/// parser could not read, its lines joined by ` / `.
+///
+/// `async-imap` renders that error as `{nom_error:?} during parsing of
+/// {text:?}` (`src/imap_stream.rs`), the nom error carrying its input as a
+/// list of byte values, so the text is the `Debug` string after the last
+/// ` during parsing of ` (PERSO-323). `None` for any other I/O error.
+fn unread_answer(io: &str) -> Option<String> {
+    let (_, quoted) = io.rsplit_once(" during parsing of ")?;
+    let text = unescape(quoted.strip_prefix('"')?.strip_suffix('"')?);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    Some(lines.join(" / "))
 }
 
 /// The text of a refusal `async-imap` kept: [`refusal_text`]'s form already

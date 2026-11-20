@@ -63,7 +63,11 @@ where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
     loop {
-        let Some(response) = session.read_response().await? else {
+        let Some(response) = session
+            .read_response()
+            .await
+            .map_err(super::words::in_server_words)?
+        else {
             return Err(anyhow!("the connection closed during the search"));
         };
         match response.parsed() {
