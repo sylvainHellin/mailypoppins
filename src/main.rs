@@ -8618,7 +8618,8 @@ mod tests {
         }
 
         /// A stand-in daemon answering each request with `script`, and the
-        /// methods it was asked, in order.
+        /// methods it was asked, in order. A `null` among the notifications
+        /// closes the connection there, as a daemon that exits does.
         fn daemon(
             name: &str,
             script: impl FnMut(&str, &Value) -> Answer + Send + 'static,
@@ -8643,6 +8644,9 @@ mod tests {
                         Err(error) => frame["error"] = error,
                     }
                     for value in std::iter::once(frame).chain(then) {
+                        if value.is_null() {
+                            return;
+                        }
                         let mut bytes = serde_json::to_vec(&value).expect("json");
                         bytes.push(b'\n');
                         write.write_all(&bytes).await.expect("write");
@@ -8915,6 +8919,88 @@ mod tests {
                     "\u{26a0} Sync of b cancelled: what it already ingested stays, and the next sync goes on from there",
                 ]
             );
+        }
+
+        /// The line a pass cut short by the daemon stopping ends with.
+        const CUT_BY_SHUTDOWN: &str = "\u{26a0} Sync of a cut short by the daemon stopping: what it \
+                                       already ingested stays, and the next sync goes on from there";
+
+        /// A pass the daemon cancelled because it was stopping says so on
+        /// stderr and counts as failed, so the run exits non-zero, and the
+        /// run stops there: the daemon is gone for every account after it.
+        /// The daemon refuses everything once it stops, so the client asks
+        /// it nothing more.
+        #[tokio::test]
+        async fn a_pass_the_daemon_cancelled_as_it_stopped_says_so_and_fails() {
+            let (path, asked) = daemon("shutdown-cancel", |method, _| match method {
+                "sync.quick" => (
+                    Ok(json!({"operation_id": "op-1"})),
+                    vec![
+                        event(
+                            "daemon.shutting_down",
+                            json!({"grace_secs": 0, "pending": []}),
+                        ),
+                        finished(
+                            "op-1",
+                            "cancelled",
+                            json!({"error": {"code": -32008, "message": "operation op-1 was cancelled"}}),
+                        ),
+                    ],
+                ),
+                _ => (
+                    Err(json!({"code": -32009, "message": "the daemon is shutting down"})),
+                    Vec::new(),
+                ),
+            });
+            let mut interrupts = Script {
+                taken: VecDeque::new(),
+                fires: 0,
+            };
+            let (end, said) = run(&path, &["a", "b"], &mut interrupts).await;
+
+            assert_eq!(
+                end,
+                SyncRunEnd {
+                    attempted: 1,
+                    failed: vec!["a".to_string()],
+                    interrupted: false
+                }
+            );
+            assert_eq!(said.last(), Some(&(true, CUT_BY_SHUTDOWN.to_string())));
+            assert_eq!(
+                *asked.lock().unwrap(),
+                ["sync.quick"],
+                "b was never started"
+            );
+        }
+
+        /// A daemon that announced its stop and closed the connection before
+        /// the pass's end reached the client is the same cut, never the
+        /// silent success or the "start one" advice of a daemon that is not
+        /// there.
+        #[tokio::test]
+        async fn a_pass_whose_daemon_stopped_and_hung_up_says_it_was_cut_short() {
+            let (path, _) = daemon("shutdown-hangup", |method, _| match method {
+                "sync.quick" => (
+                    Ok(json!({"operation_id": "op-1"})),
+                    vec![
+                        event(
+                            "daemon.shutting_down",
+                            json!({"grace_secs": 0, "pending": []}),
+                        ),
+                        Value::Null,
+                    ],
+                ),
+                other => panic!("unexpected {other}"),
+            });
+            let mut interrupts = Script {
+                taken: VecDeque::new(),
+                fires: 0,
+            };
+            let (end, said) = run(&path, &["a"], &mut interrupts).await;
+
+            assert_eq!(end.failed, ["a"]);
+            assert_eq!(said.last(), Some(&(true, CUT_BY_SHUTDOWN.to_string())));
         }
     }
 
