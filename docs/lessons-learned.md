@@ -3868,3 +3868,15 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 - `Catalogue::find` falls back to missing folders, so a hook on a folder the server left out of one LIST keeps scanning it; anything the scan reads for that folder must survive the missing period.
 - A Graph store UID is a 63-bit hash that `JSON.parse` rounds above 2^53: never put it on the wire for a client to show or key on.
 - A Graph message given up on is only downloaded again on a full sync: once it stops owing a write the delta token is minted, and quick passes walk only changed messages.
+
+## lettre 0.11.19 glues the lines of a multi-line SMTP reply together (2026-11-20, PERSO-336)
+
+- A reply over several lines reaches the error as one string with nothing between the lines; the enhanced code each continuation line repeats is the only joint left, which `src/send/words.rs` parts at.
+- A reply that is a bare code with no space after it does not parse and reads as no verdict; lettre 0.11.23 separates the lines and 0.11.24 accepts the bare code.
+- Render an SMTP error from `status()` and `source()`, never from lettre's Display, and classify from the code and the server's text, never from the rendering.
+
+## A coalesced change moves to the tail, so it must not cross a lifecycle event (2026-11-20, PERSO-337)
+
+- A Replace merged into a queued one takes the newer revision and moves to the tail; a lifecycle event queued between the two (`config.changed`) was then read before the state committed ahead of it.
+- The swap's own first sync commits a second state for an added account within a millisecond, so the merge needed only a slow connection writer: about 1 in 430 runs under a load average of 80.
+- To find such a race, loop the test six at a time beside a busy suite, and log revisions on both the commit side and the client side.
