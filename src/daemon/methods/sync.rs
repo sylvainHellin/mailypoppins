@@ -917,19 +917,27 @@ fn blocked_result() -> Value {
     json!({"blocked": true, "outcome": null})
 }
 
-/// What a pass that joined a tick already running with another bound than
-/// its own answers under `joined` (`{"limit": N}`, `null` for no bound), so
-/// the client can say its bound did not apply; `None` for a pass that ran
-/// its own tick, or joined one with its own bound.
+/// What a pass that joined a tick already running answers under `joined`
+/// (`{"limit": N}`), so the client can say it got fewer messages than it
+/// asked for; `None` for a pass that ran its own tick, or joined one that
+/// takes as many as it asked or more.
 fn joined_another_bound(
     request: &PassRequest,
     outcome: &crate::daemon::runtime::account::TickOutcome,
 ) -> Option<Value> {
-    let asked = pass_limit(request.kind, request.limit);
-    (outcome.joined && outcome.limit != asked).then(|| {
-        let limit = (outcome.limit != usize::MAX).then_some(outcome.limit);
-        json!({ "limit": limit })
-    })
+    joined_smaller(
+        outcome.joined,
+        pass_limit(request.kind, request.limit),
+        outcome.limit,
+    )
+    .map(|limit| json!({ "limit": limit }))
+}
+
+/// The bound of the tick a pass joined, when it is smaller than the `asked`
+/// one: a pass that joined a tick taking as many or more got what it asked
+/// for, which needs no word.
+fn joined_smaller(joined: bool, asked: usize, ran: usize) -> Option<usize> {
+    (joined && ran < asked).then_some(ran)
 }
 
 /// The result of a pass that ran: its `sync.completed` payload and nothing
@@ -1246,6 +1254,26 @@ async fn run_watch(imap: ImapConfig, handle: OperationHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pass that joined a tick says so only when that tick takes fewer
+    /// messages than it asked for: `-n 150` or a full pass beside the
+    /// scheduler's 100, never `-n 2` beside it or a pass that ran its own.
+    #[test]
+    fn a_joined_pass_is_reported_only_when_it_got_fewer() {
+        assert_eq!(joined_smaller(true, 150, QUICK_TICK_LIMIT), Some(100));
+        assert_eq!(
+            joined_smaller(true, usize::MAX, QUICK_TICK_LIMIT),
+            Some(100)
+        );
+        assert_eq!(joined_smaller(true, 500, 2), Some(2));
+        assert_eq!(joined_smaller(true, 2, QUICK_TICK_LIMIT), None);
+        assert_eq!(joined_smaller(true, QUICK_TICK_LIMIT, usize::MAX), None);
+        assert_eq!(
+            joined_smaller(true, QUICK_TICK_LIMIT, QUICK_TICK_LIMIT),
+            None
+        );
+        assert_eq!(joined_smaller(false, 150, 2), None);
+    }
 
     /// The array is the family, in method-name order, with the one
     /// client-scoped method the plan names.

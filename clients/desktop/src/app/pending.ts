@@ -866,6 +866,24 @@ export function syncCancelledText(account: string): string {
   return `Sync of ${account} cancelled: what it already ingested stays, and the next sync goes on from there`;
 }
 
+/**
+ * What a sync that joined a sync of `account` already running with a smaller
+ * bound ends with, the words mp-client's `format::sync_joined_line` gives the
+ * TUI and the CLI: `limit` new messages per mailbox, fewer than it asked for.
+ */
+export function syncJoinedText(account: string, limit: number): string {
+  return `Joined the sync of ${account} already running, which takes only the newest ${limit} messages per mailbox, fewer than this sync asked for; sync again once it is over for the rest`;
+}
+
+/** The bound of the smaller sync a settled pass joined (`joined.limit`), or null. */
+function joinedLimit(result: unknown): number | null {
+  if (typeof result !== "object" || result === null) return null;
+  const joined = (result as { joined?: unknown }).joined;
+  if (typeof joined !== "object" || joined === null) return null;
+  const limit = (joined as { limit?: unknown }).limit;
+  return typeof limit === "number" ? limit : null;
+}
+
 function syncEnded(s: AppState, end: OperationEnd): AppState {
   const run = s.syncs[end.operation_id];
   if (!run) return s;
@@ -883,6 +901,10 @@ function syncEnded(s: AppState, end: OperationEnd): AppState {
     const why = end.error ?? end.state;
     // The tick's own `sync.completed` already logged this failure.
     return pushNotice(next, { kind: "sync_failed", account: run.account, text: `Sync of ${run.account} failed: ${why}` }, !run.tickLogged);
+  }
+  const joined = joinedLimit(end.result);
+  if (joined !== null) {
+    return pushNotice(next, { kind: "sync_joined", account: run.account, text: syncJoinedText(run.account, joined) });
   }
   return next;
 }

@@ -39,6 +39,7 @@ export const LIFETIME_MS = {
     applied: READ_MS,
     hold_cancelled: READ_MS,
     operation_cancelled: READ_MS,
+    sync_joined: READ_MS,
     failed: STICKY_MS,
     rolled_back: STICKY_MS,
     hold_cancel_failed: STICKY_MS,

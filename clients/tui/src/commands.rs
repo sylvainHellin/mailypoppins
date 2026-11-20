@@ -1150,6 +1150,11 @@ fn sync_status_line(account: &str, settled: &Value) -> String {
     {
         return mp_client::format::calendar_synced_line(&synced);
     }
+    // A pass that joined a sync already running with a smaller bound (`sS`
+    // beside the scheduler's quick tick) has no outcome of its own.
+    if let Some(limit) = settled["joined"]["limit"].as_u64() {
+        return mp_client::format::sync_joined_line(account, limit);
+    }
     match serde_json::from_value::<SyncCompleted>(settled["outcome"].clone()) {
         Ok(outcome) => mp_client::format::sync_status_line(&outcome),
         Err(e) => {

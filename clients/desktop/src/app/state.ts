@@ -528,7 +528,9 @@ export type ActivityKind =
   | "send_partial"
   | "rebuild_refused"
   /** An operation this window cancelled from its running card: a rebuild, an RSVP, an invitation. */
-  | "operation_cancelled";
+  | "operation_cancelled"
+  /** A sync of this window that joined a sync already running with a smaller bound. */
+  | "sync_joined";
 
 /** How a line of the activity log reads: a failure is an error. */
 export type ActivityLevel = "info" | "warning" | "error";

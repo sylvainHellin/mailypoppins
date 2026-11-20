@@ -4591,13 +4591,13 @@ fn say_settled_pass(
         }
         return Synced::Ran;
     }
-    // A pass that joined a sync already running with another bound
-    // (`mp sync -n` beside the scheduler's tick) has no outcome of its own:
-    // the line says its bound did not apply.
-    if let Some(joined) = result.get("joined").filter(|joined| joined.is_object()) {
+    // A pass that joined a sync already running with a smaller bound
+    // (`mp sync -n 150` beside the scheduler's tick) has no outcome of its
+    // own: the line says it took fewer messages than asked.
+    if let Some(limit) = result["joined"]["limit"].as_u64() {
         say.out(&format!(
             "\u{2139} {}",
-            mp_client::format::sync_joined_line(&account.name, joined["limit"].as_u64())
+            mp_client::format::sync_joined_line(&account.name, limit)
         ));
     }
     if let Ok(outcome) =

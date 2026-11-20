@@ -104,22 +104,17 @@ pub fn sync_cancelled_line(account: &str) -> String {
     )
 }
 
-/// The line of a sync that joined a sync of `account` already running with
-/// another bound than its own, `limit` new messages per mailbox or, `None`,
-/// every message: the daemon runs one sync of an account at a time, so the
-/// bound asked for did not apply, and the line says so instead of letting it
-/// pass silently.
-pub fn sync_joined_line(account: &str, limit: Option<u64>) -> String {
-    match limit {
-        Some(limit) => format!(
-            "Joined the sync of {account} already running, which takes the newest {limit} \
-             messages per mailbox instead of the bound this sync asked for"
-        ),
-        None => format!(
-            "Joined the full sync of {account} already running, which takes every message \
-             instead of the bound this sync asked for"
-        ),
-    }
+/// The line of a sync that joined a sync of `account` already running whose
+/// bound, `limit` new messages per mailbox, is smaller than the one it asked
+/// for (`mp sync -n 150`, or a full sync, beside the scheduler's quick one):
+/// the daemon runs one sync of an account at a time, so the line says this
+/// one took fewer messages instead of letting it pass silently.
+pub fn sync_joined_line(account: &str, limit: u64) -> String {
+    format!(
+        "Joined the sync of {account} already running, which takes only the newest {limit} \
+         messages per mailbox, fewer than this sync asked for; sync again once it is over for \
+         the rest"
+    )
 }
 
 /// The line a cancelled sync of an account whose one server is its
