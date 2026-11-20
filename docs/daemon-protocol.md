@@ -1692,7 +1692,7 @@ It is the account's whole list as the store stands after the tick, not the tick'
 Each entry is `{mailbox, uid, kind, reason, retry_at}`: the mailbox's store key and the IMAP UID, which are all mp knows of a message it never stored; `uid` is `null` for a Graph message, whose store key is a 63-bit hash of its Message-ID that means nothing to a user and that a JavaScript number cannot hold, and whose `reason` names the Message-ID instead.
 `kind` is `refused` (the server would not send it when asked for it alone) or `unwritable` (mp could not store what it sent); `reason` is the server's words for a refusal and mp's for the other.
 `retry_at` is when mp asks the IMAP server again, RFC 3339; it is `null` for a Graph message, which only a full sync from the TUI or the desktop app asks for again, because a quick pass on a delta token walks the changed messages only.
-The list stops naming a message once a whole, trusted listing of its mailbox no longer has it (deleted or moved elsewhere, or below a `status-only` folder's window), and a folder the account no longer syncs takes its entries with it.
+The list stops naming a message once a whole, trusted listing of its mailbox no longer has it (deleted or moved elsewhere, or below a `status-only` folder's window), and a folder the account no longer syncs takes its entries with it; one the last `LIST` only left out is missing, so its entries are hidden and come back with it.
 It raises no severity: a message given up on stays listed on every tick until it arrives, and a warning on each would say nothing new.
 The payload does not list the mail the tick brought in: a client notifies from `mail.arrived`, published once the blocked senders and the hooks have judged it (PERSO-186, PERSO-306).
 

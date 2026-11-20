@@ -126,6 +126,21 @@ impl SyncTarget {
     }
 }
 
+/// Keep the messages given up on of the mailboxes in `targets`, the ones a
+/// tick syncs (PERSO-334 review): a folder the last `LIST` left out keeps its
+/// failure rows for when it comes back, and its messages are not listed
+/// meanwhile, since nothing asks the server for them.
+pub fn retain_given_up_of(
+    given_up: &mut Vec<mp_protocol::events::GivenUpMessage>,
+    targets: &[SyncTarget],
+) {
+    given_up.retain(|message| {
+        targets
+            .iter()
+            .any(|target| target.role.as_str() == message.mailbox)
+    });
+}
+
 /// The address headers of a message a sync inserted as a new row, for the
 /// contacts hook ([`crate::contacts::hooks::bump_after_sync`]) to fold in.
 ///

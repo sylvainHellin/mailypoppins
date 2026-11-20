@@ -204,15 +204,14 @@ fn record(
     }
     tx.commit().context("committing the folder list")?;
     unreferenced.remove();
-    // A folder the account no longer syncs, deleted on the server or out of
-    // its policy, is never listed again, so its failure rows go with it here,
-    // or the sync status would list its messages for ever (PERSO-334 review).
-    let syncs: Vec<String> = Catalogue::from_store(store, account)
-        .targets()
-        .iter()
-        .map(|target| target.role.as_str().to_string())
-        .collect();
-    let gone = crate::ingest::forget_failures_outside(store, &account.name, &syncs);
+    // A folder out of the account's policy, or gone from the stored listing,
+    // is never synced again, so its failure rows go with it here (PERSO-334
+    // review). A folder the last `LIST` only left out is missing, not gone:
+    // it keeps its rows, so a hook still owes its given-up messages when it
+    // comes back, and the sync status hides them meanwhile
+    // ([`crate::sync::retain_given_up_of`]).
+    let kept = Catalogue::from_store(store, account).failure_keys();
+    let gone = crate::ingest::forget_failures_outside(store, &account.name, &kept);
     if gone > 0 {
         log::info!(
             "[catalogue] {}: forgot {gone} failed message(s) of folders it no longer syncs",

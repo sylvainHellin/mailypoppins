@@ -272,12 +272,19 @@ impl Folder {
 
     /// Whether a tick downloads anything from it.
     fn ticks(&self) -> bool {
-        !self.missing
-            && match self.policy {
-                FolderPolicy::Sync => true,
-                FolderPolicy::StatusOnly => self.role.is_some(),
-                FolderPolicy::Ignore => false,
-            }
+        !self.missing && self.ticks_when_listed()
+    }
+
+    /// Whether a tick would download anything from it while the server lists
+    /// it: its policy, whether or not the last `LIST` named it. A missing
+    /// folder keeps what the sync owes it until the server lists it again
+    /// (PERSO-334 review).
+    fn ticks_when_listed(&self) -> bool {
+        match self.policy {
+            FolderPolicy::Sync => true,
+            FolderPolicy::StatusOnly => self.role.is_some(),
+            FolderPolicy::Ignore => false,
+        }
     }
 
     /// Whether it is a mailbox of the sidebar: neither ignored nor missing.
@@ -412,6 +419,18 @@ impl Catalogue {
         let mut ticking: Vec<&Folder> = self.folders.iter().filter(|f| f.ticks()).collect();
         ticking.sort_by_key(|f| target_rank(f));
         ticking.into_iter().map(Folder::target).collect()
+    }
+
+    /// The store keys of the folders whose failure rows the sync keeps: the
+    /// ones a tick syncs, and the ones it would sync but the last `LIST` left
+    /// out, which are only missing and keep their rows and cursor, so a hook
+    /// still owes their given-up messages (PERSO-334 review).
+    pub fn failure_keys(&self) -> Vec<String> {
+        self.folders
+            .iter()
+            .filter(|folder| folder.ticks_when_listed())
+            .map(|folder| folder.key.clone())
+            .collect()
     }
 
     /// The folders of the sidebar beyond the four fixed rows (Inbox, Drafts,

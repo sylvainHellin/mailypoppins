@@ -2346,7 +2346,9 @@ mod wire {
 
     /// PERSO-334 review: a message given up on in a folder the account then
     /// loses (deleted on the server) is listed no more once the folder list
-    /// is read again, and its failure row goes with the folder.
+    /// is read again. The folder is only missing, which a `LIST` that leaves
+    /// it out once cannot tell from deleted, so its failure row stays for
+    /// when it comes back, unreported.
     #[test]
     fn a_message_given_up_on_in_a_folder_the_server_drops_is_listed_no_more() {
         let mut wire = WireRoot::new();
@@ -2376,7 +2378,11 @@ mod wire {
         wire.start(&[]);
         let out = stdout(&wire.sync());
         assert!(!out.contains("could not be downloaded"), "{out}");
-        assert!(failures_elsewhere(&wire).is_empty());
+        assert_eq!(
+            failures_elsewhere(&wire),
+            vec![("Projects".to_string(), 7)],
+            "kept, unreported, for when the folder comes back"
+        );
     }
 
     /// A message given up on is asked for again once a day has passed since

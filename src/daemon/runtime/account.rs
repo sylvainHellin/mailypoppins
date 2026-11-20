@@ -1429,11 +1429,14 @@ async fn sync_once(
 ) -> Result<SyncResult> {
     refresh_catalogue(cfg, ctx.kind, listed).await?;
     let targets = crate::catalogue::Catalogue::load(cfg).targets();
-    let result = if cfg.auth_method == crate::config::AuthMethod::Graph {
+    let mut result = if cfg.auth_method == crate::config::AuthMethod::Graph {
         sync_once_graph(cfg, ctx, &targets, observations).await
     } else {
         sync_once_imap(cfg, ctx, &targets, observations).await
     };
+    if let Ok(pass) = &mut result {
+        crate::sync::retain_given_up_of(&mut pass.given_up, &targets);
+    }
     if !login_was_refused(&result) {
         refresh_status_counts(cfg).await;
     }

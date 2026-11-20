@@ -882,11 +882,11 @@ async fn body(
         } else {
             targets
         };
-        if account.auth_method == AuthMethod::Graph {
+        let pass = if account.auth_method == AuthMethod::Graph {
             let graph = crate::config::GraphConfig::load(&account)?;
             // The Graph path is not guarded yet (#0122 covers the IMAP ingest),
             // so it always reports a pass that ran.
-            return crate::graph::sync_mailboxes(
+            crate::graph::sync_mailboxes(
                 &graph,
                 &account.name,
                 &targets,
@@ -896,20 +896,30 @@ async fn body(
                 &observations,
             )
             .await
-            .map(Some);
-        }
-        let imap = ImapConfig::load(&account)?;
-        crate::imap_client::sync_mailboxes(
-            &imap,
-            &account.name,
-            &targets,
-            limit,
-            dry_run,
-            None,
-            Some(stop),
-            &observations,
-        )
-        .await
+            .map(Some)
+        } else {
+            let imap = ImapConfig::load(&account)?;
+            crate::imap_client::sync_mailboxes(
+                &imap,
+                &account.name,
+                &targets,
+                limit,
+                dry_run,
+                None,
+                Some(stop),
+                &observations,
+            )
+            .await
+        };
+        // The account's whole list, whatever folders this pass synced: the
+        // ones a tick syncs, as the runtime's tick reports it (PERSO-334).
+        pass.map(|pass| {
+            pass.map(|mut pass| {
+                let ticking = crate::catalogue::Catalogue::load(&account).targets();
+                crate::sync::retain_given_up_of(&mut pass.given_up, &ticking);
+                pass
+            })
+        })
     })
     .await
     .and_then(|inner| inner)
