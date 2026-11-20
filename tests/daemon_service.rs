@@ -833,6 +833,47 @@ fn check_reports_installed_and_missing_without_writing_anything() {
     );
 }
 
+/// `--check` against a unit that is not the one this version installs (an
+/// older version's, or one edited by hand) says so and names the command
+/// that replaces it, and still writes nothing: an install refuses that file
+/// without `--force`, so the check is the only place a stale unit shows.
+#[test]
+fn check_reports_a_unit_this_version_would_not_install() {
+    let sandbox = Sandbox::new();
+    let unit = sandbox.unit_path();
+    assert_eq!(code(&sandbox.install(&[])), 0);
+    let current = std::fs::read_to_string(&unit).expect("the installed unit");
+    let older = current.replace(
+        "Documentation=https://mailypoppins.com",
+        "Documentation=https://mailypoppins.dev",
+    );
+    assert_ne!(older, current, "the template documents the .com site");
+    std::fs::write(&unit, &older).expect("an older unit");
+
+    let out = sandbox.install(&["--check"]);
+    assert_eq!(
+        code(&out),
+        0,
+        "a service is installed; stderr: {}",
+        stderr_text(&out)
+    );
+    assert_eq!(
+        stdout_lines(&out),
+        vec![
+            format!(
+                "\u{26a0} service installed at {}, but it is not the one this version installs",
+                unit.display()
+            ),
+            "  replace it: mp daemon install-service --force".to_string(),
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&unit).expect("the unit"),
+        older,
+        "--check rewrites nothing"
+    );
+}
+
 /// Without `$XDG_CONFIG_HOME` the unit lands under `$HOME/.config`.
 #[test]
 fn without_xdg_config_home_the_unit_lands_under_home_config() {
