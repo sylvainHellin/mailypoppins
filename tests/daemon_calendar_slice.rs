@@ -24,7 +24,7 @@
 
 mod support;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::Duration as Days;
@@ -40,9 +40,11 @@ use support::calendar_fixture::{
     at, day, fake_spec_with, seed, seed_series, series_occurrences, write_log, FAKE_FEATURES, IMIP,
     LOCAL_UID, MEETING_UID, SERIES_UID, SERVER,
 };
+use support::fake_smtp::{SmtpAnswer, SmtpStep};
 use support::parity::{socket_path, DaemonFixture};
 use support::read_fixture;
 use support::send_fixture;
+use support::wire_fixture::WireServers;
 
 const DEADLINE: Duration = Duration::from_secs(20);
 const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
@@ -55,6 +57,9 @@ const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
 struct Slice {
     tmp: TempDir,
     daemon: Option<DaemonFixture>,
+    /// The fake servers the account without a backend ([`IMIP`]) submits to
+    /// and files its Sent copies in, for a row whose mail has to go out.
+    wire: Option<WireServers>,
 }
 
 impl Slice {
@@ -76,6 +81,7 @@ impl Slice {
         Slice {
             tmp,
             daemon: Some(daemon),
+            wire: None,
         }
     }
 
@@ -97,11 +103,57 @@ impl Slice {
         Slice {
             tmp,
             daemon: Some(daemon),
+            wire: None,
+        }
+    }
+
+    /// The fixture plus what `seed_more` writes, with [`IMIP`] on the fake
+    /// SMTP and IMAP servers (PERSO-331) and `extra` on top of the calendar
+    /// fake; `setup` makes what it tests of the servers once the daemon's
+    /// first drain has run ([`WireServers::await_startup_drain`]).
+    fn start_wired(
+        extra: &[(&str, String)],
+        seed_more: impl FnOnce(&Path),
+        setup: impl FnOnce(&WireServers),
+    ) -> Slice {
+        Slice::start_wired_with(extra, seed_more, |wire, root| wire.wire(root, IMIP), setup)
+    }
+
+    /// [`Slice::start_wired`] with `wiring` moving [`IMIP`] onto the
+    /// servers in the root, before the daemon starts.
+    fn start_wired_with(
+        extra: &[(&str, String)],
+        seed_more: impl FnOnce(&Path),
+        wiring: impl FnOnce(&WireServers, &Path),
+        setup: impl FnOnce(&WireServers),
+    ) -> Slice {
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path());
+        seed_more(tmp.path());
+        let wire = WireServers::start();
+        wiring(&wire, tmp.path());
+        let spec = fake_spec_with(&tmp.path().join("calendar.jsonl"), false, Vec::new());
+        let mut env: Vec<(&str, &str)> = vec![(FAKE_CALENDAR_ENV, spec.as_str())];
+        env.extend(extra.iter().map(|(k, v)| (*k, v.as_str())));
+        let daemon = DaemonFixture::start_with(tmp.path(), None, &env);
+        wire.await_startup_drain(tmp.path(), IMIP);
+        setup(&wire);
+        Slice {
+            tmp,
+            daemon: Some(daemon),
+            wire: Some(wire),
         }
     }
 
     fn root(&self) -> &Path {
         self.tmp.path()
+    }
+
+    /// The fake servers of a wired slice.
+    fn wire(&self) -> &WireServers {
+        self.wire
+            .as_ref()
+            .expect("this row's slice is wired to the fake servers")
     }
 
     fn answers(&self) -> Vec<RecordedResponse> {
@@ -627,17 +679,7 @@ async fn event_respond_without_the_scope_is_the_relogin_prompt() {
 /// leave the organizer uninformed.
 #[tokio::test]
 async fn event_respond_on_an_invitation_mail_sends_the_imip_reply() {
-    // The ledger lives beside the slice, whose root exists only once it is
-    // built.
-    let ledger = tempfile::tempdir().unwrap();
-    let log: PathBuf = ledger.path().join("transport.log");
-    let slice = Slice::start_with(
-        false,
-        &[(
-            send_fixture::FAKE_TRANSPORT_ENV,
-            send_fixture::fake_transport(&log),
-        )],
-    );
+    let slice = Slice::start_wired(&[], |_| (), |_| ());
     let mut conn = slice.connect().await;
     let event = format!("imip:{}", row_of(slice.root(), IMIP));
 
@@ -670,12 +712,11 @@ async fn event_respond_on_an_invitation_mail_sends_the_imip_reply() {
     let result = succeeded(&status);
     assert_eq!(result["via"], "imip", "{result}");
     assert_eq!(result["delivered"], true, "{result}");
-    let submitted = send_fixture::transport_events(&log)
+    let submitted = slice
+        .wire()
+        .submissions()
         .into_iter()
-        .any(|event| {
-            matches!(event, send_fixture::TransportEvent::Submit { address, accepted: true, .. }
-                if address == "chair@tum.de")
-        });
+        .any(|(_, address, acknowledged)| address == "chair@tum.de" && acknowledged);
     assert!(submitted, "the reply reached the organizer");
     assert!(slice.answers().is_empty(), "no server call for a mail");
 }
@@ -2341,36 +2382,74 @@ async fn a_proposed_time_is_refused_before_any_server_call() {
 // ---------------------------------------------------------------------------
 
 /// The slice with the account without a backend holding the sent copies of
-/// two invitations it organised, and the transport fake armed with its
-/// ledger at `log`.
-fn organised_slice(log: &Path) -> Slice {
-    organised_slice_rejecting(log, &[])
+/// two invitations it organised, on the fake SMTP and IMAP servers.
+fn organised_slice() -> Slice {
+    organised_slice_with(|_| ())
 }
 
-/// The same, the transport refusing `rejected` for good.
-fn organised_slice_rejecting(log: &Path, rejected: &[(&str, &str)]) -> Slice {
-    organised_slice_with(send_fixture::fake_transport_rejecting(log, rejected))
+/// The same, the SMTP server answering the `RCPT` of each of `refused` with
+/// its reply, for good: a `5xx` refuses the recipient, a `4xx` defers it.
+fn organised_slice_refusing(refused: &[(&str, &str)]) -> Slice {
+    organised_slice_with(|wire| {
+        for (address, reply) in refused {
+            refuse(wire, address, reply);
+        }
+    })
 }
 
-/// The same, the transport armed with `transport`.
-fn organised_slice_with(transport: String) -> Slice {
-    Slice::start_seeded(
-        false,
-        &[(send_fixture::FAKE_TRANSPORT_ENV, transport)],
-        support::calendar_fixture::seed_organised,
-        Vec::new(),
-    )
+/// The same, with what `setup` makes of the servers.
+fn organised_slice_with(setup: impl FnOnce(&WireServers)) -> Slice {
+    Slice::start_wired(&[], support::calendar_fixture::seed_organised, setup)
 }
 
-/// Every address the transport fake was asked to deliver to, accepted or
-/// not, in order.
-fn asked(log: &Path) -> Vec<String> {
-    send_fixture::transport_events(log)
+/// The same, the SMTP server greeting every connection with [`UNAVAILABLE`],
+/// the `421` of RFC 5321 3.1: every submission fails before any recipient
+/// is asked, and is kept for a later pass.
+fn organised_slice_unavailable() -> Slice {
+    organised_slice_with(|wire| {
+        wire.smtp
+            .answer(SmtpStep::Greeting, Some(SmtpAnswer::reply(UNAVAILABLE)))
+    })
+}
+
+/// The greeting of an SMTP server that will not serve for now.
+const UNAVAILABLE: &str = "421 4.3.2 Service not available";
+
+/// The SMTP server answers `address`'s `RCPT` with `reply` for good: a `5xx`
+/// refuses the recipient, a `4xx` defers it.
+fn refuse(wire: &WireServers, address: &str, reply: &str) {
+    wire.smtp
+        .answer_for(address, SmtpStep::Rcpt, Some(SmtpAnswer::reply(reply)));
+}
+
+/// The SMTP server takes the message for `address` and hangs up before its
+/// verdict, for the next `times` messages or, with `None`, for good: the
+/// sender cannot know whether it arrived.
+fn unconfirm(wire: &WireServers, address: &str, times: Option<usize>) {
+    match times {
+        Some(times) => {
+            wire.smtp
+                .answer_for_next(address, SmtpStep::Message, SmtpAnswer::HangUp, times)
+        }
+        None => wire
+            .smtp
+            .answer_for(address, SmtpStep::Message, Some(SmtpAnswer::HangUp)),
+    }
+}
+
+/// The IMAP server refuses every APPEND, so no Sent copy is filed.
+fn refuse_appends(wire: &WireServers) {
+    wire.imap
+        .refuse("APPEND", Some("NO [SERVERBUG] the Sent folder refused it"));
+}
+
+/// Every address the SMTP server was asked to deliver to, taken or not, in
+/// order.
+fn asked(wire: &WireServers) -> Vec<String> {
+    wire.smtp
+        .rcpts()
         .into_iter()
-        .filter_map(|event| match event {
-            send_fixture::TransportEvent::Submit { address, .. } => Some(address),
-            _ => None,
-        })
+        .map(|rcpt| rcpt.address)
         .collect()
 }
 
@@ -2383,18 +2462,13 @@ async fn imip_event(conn: &mut Connection, account: &str, uid: &str) -> Value {
         .unwrap_or_else(|| panic!("{account} lists no event {uid}"))
 }
 
-/// The addresses the transport fake accepted a message for, in order.
-fn told(log: &Path) -> Vec<String> {
-    send_fixture::transport_events(log)
+/// The addresses the SMTP server took a message for and acknowledged, in
+/// order.
+fn told(wire: &WireServers) -> Vec<String> {
+    wire.submissions()
         .into_iter()
-        .filter_map(|event| match event {
-            send_fixture::TransportEvent::Submit {
-                address,
-                accepted: true,
-                ..
-            } => Some(address),
-            _ => None,
-        })
+        .filter(|(_, _, acknowledged)| *acknowledged)
+        .map(|(_, address, _)| address)
         .collect()
 }
 
@@ -2403,9 +2477,7 @@ fn told(log: &Path) -> Vec<String> {
 /// drops, and the agenda shows the new version as soon as it settles.
 #[tokio::test]
 async fn event_update_resends_an_invitation_the_account_organised() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice(&log);
+    let slice = organised_slice();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let id = own["id"].as_str().unwrap().to_string();
@@ -2452,7 +2524,7 @@ async fn event_update_resends_an_invitation_the_account_organised() {
         assert_eq!(error.code, -32602, "{params}: {}", error.message);
         assert!(error.message.contains(words), "{params}: {}", error.message);
     }
-    assert!(told(&log).is_empty(), "a refusal sends nothing");
+    assert!(told(slice.wire()).is_empty(), "a refusal sends nothing");
 
     let status = run_operation(
         &mut conn,
@@ -2469,7 +2541,7 @@ async fn event_update_resends_an_invitation_the_account_organised() {
     assert_eq!(result["event"]["uid"], support::calendar_fixture::OWN_UID);
     assert!(result.get("scope").is_none(), "{result}");
     // The update first, then the cancellation of the attendee it drops.
-    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+    assert_eq!(told(slice.wire()), ["ada@example.com", "bob@example.com"]);
     assert!(result.get("refused").is_none(), "{result}");
 
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
@@ -2494,9 +2566,7 @@ async fn event_update_resends_an_invitation_the_account_organised() {
 /// cancelled on its own, the series staying live.
 #[tokio::test]
 async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice(&log);
+    let slice = organised_slice();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let id = own["id"].as_str().unwrap().to_string();
@@ -2583,7 +2653,7 @@ async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised
         "{}",
         delete.message
     );
-    assert!(told(&log).is_empty(), "a refusal sends nothing");
+    assert!(told(slice.wire()).is_empty(), "a refusal sends nothing");
 
     let status = run_operation(
         &mut conn,
@@ -2666,9 +2736,7 @@ async fn event_cancel_tells_the_attendees_of_an_invitation_the_account_organised
 /// organizer's meeting live and changeable.
 #[tokio::test]
 async fn an_update_nobody_received_cancels_nobody() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_rejecting(&log, &[("ada@example.com", "550 no such user")]);
+    let slice = organised_slice_refusing(&[("ada@example.com", "550 no such user")]);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let id = own["id"].as_str().unwrap().to_string();
@@ -2681,11 +2749,11 @@ async fn an_update_nobody_received_cancels_nobody() {
         let error = status["error"]["message"].as_str().unwrap_or_default();
         assert!(
             error.contains("No attendee accepted")
-                && error.contains("ada@example.com (550 no such user)"),
+                && error.contains("ada@example.com (permanent error (550): no such user)"),
             "{status}"
         );
         assert_eq!(
-            asked(&log)
+            asked(slice.wire())
                 .iter()
                 .filter(|a| *a == "bob@example.com")
                 .count(),
@@ -2705,12 +2773,7 @@ async fn an_update_nobody_received_cancels_nobody() {
 /// some of its attendees.
 #[tokio::test]
 async fn an_update_the_server_defers_still_cancels_the_attendee_it_drops() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
-        &log,
-        &[("ada@example.com", "451 4.7.1 try again later")],
-    ));
+    let slice = organised_slice_refusing(&[("ada@example.com", "451 4.7.1 try again later")]);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -2723,14 +2786,14 @@ async fn an_update_the_server_defers_still_cancels_the_attendee_it_drops() {
     assert_eq!(status["state"], "failed", "{status}");
     let error = status["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        error.contains("ada@example.com (451 4.7.1 try again later)")
+        error.contains("ada@example.com (transient error (451): 4.7.1 try again later)")
             && error.contains("waits in the outbox")
             && error.contains("told bob@example.com")
             && !error.contains("nothing else was sent"),
         "{status}"
     );
     assert_eq!(
-        told(&log),
+        told(slice.wire()),
         ["bob@example.com"],
         "the dropped attendee is told"
     );
@@ -2758,12 +2821,7 @@ async fn an_update_the_server_defers_still_cancels_the_attendee_it_drops() {
 /// is queued beside it rather than never sent.
 #[tokio::test]
 async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_down(
-        &log,
-        "connection refused",
-    ));
+    let slice = organised_slice_unavailable();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -2776,11 +2834,11 @@ async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
     assert_eq!(status["state"], "failed", "{status}");
     let error = status["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        error.contains("connection refused")
+        error.contains("transient error (421): 4.3.2 Service not available")
             && error.contains("waits in the outbox")
             && error.contains(
                 "the cancellation to the attendees it drops waits in the outbox for \
-                 bob@example.com (connection refused)"
+                 bob@example.com (transient error (421): 4.3.2 Service not available)"
             )
             && !error.contains("was not taken"),
         "{status}"
@@ -2803,14 +2861,10 @@ async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
 /// names the second as refused for good, never as waiting.
 #[tokio::test]
 async fn an_update_deferred_for_one_and_refused_for_another_says_which_waits() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(
-        json!({"log": log.to_string_lossy(),
-               "defer": {"ada@example.com": "451 4.7.1 try again later"},
-               "reject": {"cy@example.com": "550 no such user"}})
-        .to_string(),
-    );
+    let slice = organised_slice_refusing(&[
+        ("ada@example.com", "451 4.7.1 try again later"),
+        ("cy@example.com", "550 no such user"),
+    ]);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -2825,9 +2879,9 @@ async fn an_update_deferred_for_one_and_refused_for_another_says_which_waits() {
     assert!(
         error.contains(
             "No attendee has the message yet: the server did not take it for ada@example.com \
-             (451 4.7.1 try again later); it waits in the outbox"
+             (transient error (451): 4.7.1 try again later); it waits in the outbox"
         ) && error.contains(
-            "the server refused it for good for cy@example.com (550 no such user), who will \
+            "the server refused it for good for cy@example.com (permanent error (550): no such user), who will \
              not get it"
         ) && error.contains("told bob@example.com"),
         "{status}"
@@ -2867,15 +2921,10 @@ async fn refused_while_queued(conn: &mut Connection, method: &str, params: Value
 /// row stays pending for a later pass, so it was not refused.
 #[tokio::test]
 async fn a_deferred_cancellation_of_a_dropped_attendee_waits_in_the_outbox() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
-        &log,
-        &[
-            ("ada@example.com", "451 4.7.1 try again later"),
-            ("bob@example.com", "451 4.7.1 try again later"),
-        ],
-    ));
+    let slice = organised_slice_refusing(&[
+        ("ada@example.com", "451 4.7.1 try again later"),
+        ("bob@example.com", "451 4.7.1 try again later"),
+    ]);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -2890,7 +2939,7 @@ async fn a_deferred_cancellation_of_a_dropped_attendee_waits_in_the_outbox() {
     assert!(
         error.contains(
             "the cancellation to the attendees it drops waits in the outbox for \
-             bob@example.com (451 4.7.1 try again later)"
+             bob@example.com (transient error (451): 4.7.1 try again later)"
         ) && !error.contains("was not taken"),
         "{status}"
     );
@@ -2905,12 +2954,7 @@ async fn a_deferred_cancellation_of_a_dropped_attendee_waits_in_the_outbox() {
 /// row and the way out.
 #[tokio::test]
 async fn a_change_waits_for_a_deferred_update_that_replaced_every_attendee() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
-        &log,
-        &[("carol@example.com", "451 4.7.1 try again later")],
-    ));
+    let slice = organised_slice_refusing(&[("carol@example.com", "451 4.7.1 try again later")]);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let replace = json!({"account": IMIP, "event": own["id"],
@@ -2919,7 +2963,7 @@ async fn a_change_waits_for_a_deferred_update_that_replaced_every_attendee() {
     assert_eq!(status["state"], "failed", "{status}");
     let error = status["error"]["message"].as_str().unwrap_or_default();
     assert!(error.contains("waits in the outbox"), "{status}");
-    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+    assert_eq!(told(slice.wire()), ["ada@example.com", "bob@example.com"]);
 
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     assert_eq!(now["cancelled"], false, "{now}");
@@ -2945,7 +2989,7 @@ async fn a_change_waits_for_a_deferred_update_that_replaced_every_attendee() {
     )
     .await;
     assert_eq!(
-        told(&log),
+        told(slice.wire()),
         ["ada@example.com", "bob@example.com"],
         "nothing more was mailed"
     );
@@ -2958,14 +3002,7 @@ async fn a_change_waits_for_a_deferred_update_that_replaced_every_attendee() {
 /// is taken again, telling its attendee and ending the meeting.
 #[tokio::test]
 async fn a_change_is_taken_again_once_the_parked_update_went_out() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(
-        json!({"log": log.to_string_lossy(),
-               "unknown": {"carol@example.com": send_fixture::AMBIGUOUS},
-               "passes": 1})
-        .to_string(),
-    );
+    let slice = organised_slice_with(|wire| unconfirm(wire, "carol@example.com", Some(1)));
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -2981,7 +3018,7 @@ async fn a_change_is_taken_again_once_the_parked_update_went_out() {
         error.contains("gave no verdict") && error.contains("told ada@example.com"),
         "{status}"
     );
-    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+    assert_eq!(told(slice.wire()), ["ada@example.com", "bob@example.com"]);
 
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     assert_eq!(now["cancelled"], false, "{now}");
@@ -3027,19 +3064,14 @@ async fn a_change_is_taken_again_once_the_parked_update_went_out() {
     );
 }
 
-/// An update that only adds an attendee, queued with the transport down,
+/// An update that only adds an attendee, queued with the SMTP server unavailable,
 /// refuses a cancellation made before it goes out: built on the old
 /// version, it would name Ada and Bob alone at the queued update's
 /// sequence, which the organizer's agenda would then read as their
 /// uninvitation, and Carol would never be told.
 #[tokio::test]
 async fn a_cancel_waits_for_a_queued_update_that_adds_an_attendee() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_down(
-        &log,
-        "connection refused",
-    ));
+    let slice = organised_slice_unavailable();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3065,19 +3097,14 @@ async fn a_cancel_waits_for_a_queued_update_that_adds_an_attendee() {
     );
 }
 
-/// An update that drops an attendee, queued with the transport down,
+/// An update that drops an attendee, queued with the SMTP server unavailable,
 /// holds the uninvitation and the new version in the outbox; a
 /// cancellation made then would take the uninvitation's sequence, below
 /// the update's, and be lost on every attendee that update reaches, so it
 /// is refused.
 #[tokio::test]
 async fn a_cancel_waits_for_a_queued_update_and_its_uninvitation() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_down(
-        &log,
-        "connection refused",
-    ));
+    let slice = organised_slice_unavailable();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3108,10 +3135,7 @@ async fn a_cancel_waits_for_a_queued_update_and_its_uninvitation() {
 /// holds nothing back (`an_update_nobody_received_cancels_nobody`).
 #[tokio::test]
 async fn a_change_waits_for_the_copy_of_the_one_before_it() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice =
-        organised_slice_with(json!({"log": log.to_string_lossy(), "append": "fail"}).to_string());
+    let slice = organised_slice_with(refuse_appends);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     run_operation(
@@ -3120,7 +3144,7 @@ async fn a_change_waits_for_the_copy_of_the_one_before_it() {
         json!({"account": IMIP, "event": own["id"], "fields": {"summary": "Budget, moved"}}),
     )
     .await;
-    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+    assert_eq!(told(slice.wire()), ["ada@example.com", "bob@example.com"]);
     assert_eq!(outbox_rows(&mut conn, "sent_pending_append").await.len(), 1);
     let message = refused_while_queued(
         &mut conn,
@@ -3129,7 +3153,7 @@ async fn a_change_waits_for_the_copy_of_the_one_before_it() {
     )
     .await;
     assert!(message.contains("not filed in Sent yet"), "{message}");
-    assert_eq!(told(&log), ["ada@example.com", "bob@example.com"]);
+    assert_eq!(told(slice.wire()), ["ada@example.com", "bob@example.com"]);
 }
 
 /// A cancellation of one occurrence the server defers is refused a second
@@ -3137,12 +3161,7 @@ async fn a_change_waits_for_the_copy_of_the_one_before_it() {
 /// cancellation twice, and so is any other change of the series.
 #[tokio::test]
 async fn an_occurrence_cancel_waits_for_the_one_queued_before_it() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
-        &log,
-        &[("ada@example.com", "451 4.7.1 try again later")],
-    ));
+    let slice = organised_slice_refusing(&[("ada@example.com", "451 4.7.1 try again later")]);
     let mut conn = slice.connect().await;
     let series = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_SERIES_UID).await;
     let occurrence = (at(13, 8)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -3165,9 +3184,7 @@ async fn an_occurrence_cancel_waits_for_the_one_queued_before_it() {
 /// the update went out.
 #[tokio::test]
 async fn an_update_names_the_attendees_the_server_refused() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_rejecting(&log, &[("cy@example.com", "550 no such user")]);
+    let slice = organised_slice_refusing(&[("cy@example.com", "550 no such user")]);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3181,11 +3198,11 @@ async fn an_update_names_the_attendees_the_server_refused() {
     assert_eq!(
         result["refused"],
         json!([{"address": "cy@example.com", "role": "To", "delivered": false,
-                "error": "550 no such user"}]),
+                "error": "permanent error (550): no such user"}]),
         "{result}"
     );
     assert_eq!(
-        asked(&log),
+        asked(slice.wire()),
         ["ada@example.com", "cy@example.com", "bob@example.com"]
     );
     let now = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
@@ -3198,14 +3215,10 @@ async fn an_update_names_the_attendees_the_server_refused() {
 /// waits in the outbox for a later pass (`queued`), and nothing else.
 #[tokio::test]
 async fn a_settled_update_names_who_waits_in_the_outbox_apart_from_who_was_refused() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(
-        json!({"log": log.to_string_lossy(),
-               "reject": {"cy@example.com": "550 no such user"},
-               "defer": {"bob@example.com": "451 4.7.1 try again later"}})
-        .to_string(),
-    );
+    let slice = organised_slice_refusing(&[
+        ("cy@example.com", "550 no such user"),
+        ("bob@example.com", "451 4.7.1 try again later"),
+    ]);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3219,13 +3232,13 @@ async fn a_settled_update_names_who_waits_in_the_outbox_apart_from_who_was_refus
     assert_eq!(
         result["refused"],
         json!([{"address": "cy@example.com", "role": "To", "delivered": false,
-                "error": "550 no such user"}]),
+                "error": "permanent error (550): no such user"}]),
         "{result}"
     );
     assert_eq!(
         result["queued"],
         json!([{"address": "bob@example.com", "role": "To", "delivered": false,
-                "error": "451 4.7.1 try again later"}]),
+                "error": "transient error (451): 4.7.1 try again later"}]),
         "{result}"
     );
     assert!(result.get("parked").is_none(), "{result}");
@@ -3237,12 +3250,7 @@ async fn a_settled_update_names_who_waits_in_the_outbox_apart_from_who_was_refus
 /// `parked`, never as refused for good nor as going out on its own.
 #[tokio::test]
 async fn a_settled_update_names_who_is_parked_in_the_outbox() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_unconfirming(
-        &log,
-        &[("bob@example.com", send_fixture::AMBIGUOUS)],
-    ));
+    let slice = organised_slice_with(|wire| unconfirm(wire, "bob@example.com", None));
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3256,7 +3264,7 @@ async fn a_settled_update_names_who_is_parked_in_the_outbox() {
     assert_eq!(
         result["parked"],
         json!([{"address": "bob@example.com", "role": "To", "delivered": false,
-                "error": send_fixture::AMBIGUOUS}]),
+                "error": "response error: incomplete response"}]),
         "{result}"
     );
     assert!(result.get("refused").is_none(), "{result}");
@@ -3267,12 +3275,7 @@ async fn a_settled_update_names_who_is_parked_in_the_outbox() {
 /// `queued` and the others under `notified`.
 #[tokio::test]
 async fn a_settled_cancel_names_who_waits_in_the_outbox() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_deferring(
-        &log,
-        &[("bob@example.com", "451 4.7.1 try again later")],
-    ));
+    let slice = organised_slice_refusing(&[("bob@example.com", "451 4.7.1 try again later")]);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3286,7 +3289,7 @@ async fn a_settled_cancel_names_who_waits_in_the_outbox() {
     assert_eq!(
         result["queued"],
         json!([{"address": "bob@example.com", "role": "To", "delivered": false,
-                "error": "451 4.7.1 try again later"}]),
+                "error": "transient error (451): 4.7.1 try again later"}]),
         "{result}"
     );
     assert!(result.get("refused").is_none(), "{result}");
@@ -3322,14 +3325,7 @@ fn attendees_of(event: &Value) -> Vec<String> {
 /// Carol too, above the `SEQUENCE` she may hold.
 #[tokio::test]
 async fn a_discarded_update_someone_may_hold_is_the_version_a_later_change_builds_on() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(
-        json!({"log": log.to_string_lossy(),
-               "unknown": {"carol@example.com": send_fixture::AMBIGUOUS},
-               "passes": 1})
-        .to_string(),
-    );
+    let slice = organised_slice_with(|wire| unconfirm(wire, "carol@example.com", Some(1)));
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3411,24 +3407,15 @@ async fn a_discarded_update_someone_may_hold_is_the_version_a_later_change_build
 #[tokio::test]
 async fn a_discard_that_keeps_a_version_announces_the_calendar_change() {
     const PLAIN: &str = "<plain-parked@example.com>";
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = Slice::start_seeded(
-        false,
-        &[(
-            send_fixture::FAKE_TRANSPORT_ENV,
-            json!({"log": log.to_string_lossy(),
-                   "unknown": {"carol@example.com": send_fixture::AMBIGUOUS},
-                   "passes": 1})
-            .to_string(),
-        )],
+    let slice = Slice::start_wired(
+        &[],
         |root| {
             support::calendar_fixture::seed_organised(root);
             let store = send_fixture::store(root, IMIP);
             let blobs = send_fixture::blobs(root, IMIP);
             send_fixture::park_mail(&store, &blobs, IMIP, PLAIN);
         },
-        Vec::new(),
+        |wire| unconfirm(wire, "carol@example.com", Some(1)),
     );
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
@@ -3499,10 +3486,7 @@ async fn a_discard_that_keeps_a_version_announces_the_calendar_change() {
 /// cancellation tells Carol.
 #[tokio::test]
 async fn a_discarded_update_whose_copy_was_not_filed_is_the_version_a_later_change_builds_on() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice =
-        organised_slice_with(json!({"log": log.to_string_lossy(), "append": "fail"}).to_string());
+    let slice = organised_slice_with(refuse_appends);
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3547,16 +3531,11 @@ async fn a_discarded_update_whose_copy_was_not_filed_is_the_version_a_later_chan
 }
 
 /// An update nobody can hold, queued and never submitted with the
-/// transport down, is dropped whole by a discard: the agenda keeps the
+/// SMTP server unavailable, is dropped whole by a discard: the agenda keeps the
 /// version before it.
 #[tokio::test]
 async fn a_discarded_update_nobody_can_hold_leaves_the_version_before_it() {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let slice = organised_slice_with(send_fixture::fake_transport_down(
-        &log,
-        "connection refused",
-    ));
+    let slice = organised_slice_unavailable();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let held = held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "REQUEST");
@@ -3584,7 +3563,7 @@ async fn a_discarded_update_nobody_can_hold_leaves_the_version_before_it() {
 }
 
 /// Two updates of one invitation planned before either is enqueued, from
-/// two connections, the transport armed with `transport`: the refusal of
+/// two connections, with what `setup` makes of the fake servers: the refusal of
 /// the second, after asserting that the first went out alone, as one row in
 /// the outbox.
 ///
@@ -3594,21 +3573,16 @@ async fn a_discarded_update_nobody_can_hold_leaves_the_version_before_it() {
 /// plan-time guard has nothing to see, so the second can be refused only by
 /// the check under the lock (`still_as_planned`), once the first has gone
 /// out.
-async fn race_two_updates(transport: impl FnOnce(&Path) -> String) -> String {
-    let ledger = tempfile::tempdir().unwrap();
-    let log = ledger.path().join("transport.log");
-    let hold = send_fixture::commit_hold_dir(ledger.path());
-    let slice = Slice::start_seeded(
-        false,
-        &[
-            (send_fixture::FAKE_TRANSPORT_ENV, transport(&log)),
-            (
-                mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV,
-                hold.to_string_lossy().into_owned(),
-            ),
-        ],
+async fn race_two_updates(setup: impl FnOnce(&WireServers)) -> String {
+    let markers = tempfile::tempdir().unwrap();
+    let hold = send_fixture::commit_hold_dir(markers.path());
+    let slice = Slice::start_wired(
+        &[(
+            mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV,
+            hold.to_string_lossy().into_owned(),
+        )],
         support::calendar_fixture::seed_organised,
-        Vec::new(),
+        setup,
     );
     let mut first = slice.connect().await;
     let mut second = slice.connect().await;
@@ -3635,13 +3609,7 @@ async fn race_two_updates(transport: impl FnOnce(&Path) -> String) -> String {
         .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 1, "one row for the one update taken");
-    let messages: std::collections::BTreeSet<String> = send_fixture::transport_events(&log)
-        .into_iter()
-        .filter_map(|event| match event {
-            send_fixture::TransportEvent::Submit { message_id, .. } => Some(message_id),
-            _ => None,
-        })
-        .collect();
+    let messages = slice.wire().submitted_message_ids(&[]);
     assert_eq!(messages.len(), 1, "one message submitted: {messages:?}");
     b["error"]["message"].as_str().unwrap_or("").to_string()
 }
@@ -3656,16 +3624,13 @@ async fn race_two_updates(transport: impl FnOnce(&Path) -> String) -> String {
 /// while it waited. Only the check under the lock says "nothing was sent".
 #[tokio::test]
 async fn two_updates_at_once_send_one() {
-    let waiting = race_two_updates(|log| {
-        send_fixture::fake_transport_deferring(log, &[("ada@example.com", "451 later")])
-    })
-    .await;
+    let waiting = race_two_updates(|wire| refuse(wire, "ada@example.com", "451 later")).await;
     assert!(
         waiting.contains("has an earlier change waiting in the outbox")
             && waiting.contains("nothing was sent"),
         "{waiting}"
     );
-    let filed = race_two_updates(send_fixture::fake_transport).await;
+    let filed = race_two_updates(|_| ()).await;
     assert!(
         filed.contains("changed while this change waited to go out")
             && filed.contains("nothing was sent"),
