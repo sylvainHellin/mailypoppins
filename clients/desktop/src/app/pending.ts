@@ -884,6 +884,14 @@ function joinedLimit(result: unknown): number | null {
   return typeof limit === "number" ? limit : null;
 }
 
+/**
+ * What a sync the daemon cancelled because it was stopping ends with, the
+ * words mp-client's `format::sync_cut_by_shutdown_line` gives the TUI and the CLI.
+ */
+export function syncCutByShutdownText(account: string): string {
+  return `Sync of ${account} cut short by the daemon stopping: what it already ingested stays, and the next sync goes on from there`;
+}
+
 function syncEnded(s: AppState, end: OperationEnd): AppState {
   const run = s.syncs[end.operation_id];
   if (!run) return s;
@@ -894,8 +902,10 @@ function syncEnded(s: AppState, end: OperationEnd): AppState {
     return pushNotice(next, { kind: "sync_failed", account: run.account, text: `Sync of ${run.account} was dropped: ${end.dropped}` });
   }
   // A cancel is no failure of the sync: it ends on what stays (PERSO-321).
+  // One that came after the daemon announced its stop was that stop's.
   if (end.state === "cancelled") {
-    return pushNotice(next, { kind: "operation_cancelled", account: run.account, text: syncCancelledText(run.account) });
+    const text = s.shuttingDown ? syncCutByShutdownText(run.account) : syncCancelledText(run.account);
+    return pushNotice(next, { kind: "operation_cancelled", account: run.account, text });
   }
   if (end.state === "failed") {
     const why = end.error ?? end.state;
