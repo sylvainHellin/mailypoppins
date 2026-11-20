@@ -3846,3 +3846,16 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 - Anything that walks a mailbox by UID behind the arrival mark (the hook cursor) passes a given-up UID while it has no row, so it has to remember it as owed; holding the mark below it instead stalls that walker for good behind a message that may never come.
 - `MAX_INGEST_ATTEMPTS` counts passes, and the IDLE watcher runs a pass per arrival, so a failure counts only `FAILURE_SPACING_SECS` after the last counted one; without that, three passes in a minute give up on a message a passing refusal or a briefly locked store kept out.
 - `mp sync` is always `sync.quick`, whatever its `-n`; only the TUI's and the desktop app's full sync reach an uncapped pass, and a status-only folder's window caps even that.
+
+## An account with a server gets a drainer that drains 1.5 s after start (2026-11-20, PERSO-331)
+
+- A local-only account gets no drainer, so moving a fixture account onto the fake servers sends its seeded queued rows in the background 1.5 s after the daemon starts, and even an empty outbox costs that drain its engine turn.
+- A test waits for the drainer's "[drainer] published <account>" log line (`WireServers::await_startup_drain`), then sets up the servers, and counts only its own Message-IDs.
+- lettre words a server refusal as "permanent error (550): <text>" or "transient error (451): <text>", and a hang-up after DATA as "response error: incomplete response".
+
+## Over the wire, only a refused login fails a whole SMTP submission (2026-11-20, PERSO-331)
+
+- A 421 greeting, a refused connection or a failed TLS handshake becomes a verdict per recipient, and submit returns Ok; only a login the server refuses (535, or 5.7.8) makes `send_durably` return an error, with the row queued and no attempt spent.
+- A test of the error path (`Reach::after`, `Reached::after`, `still_pending` in `src/daemon/methods/calendar.rs`) refuses AUTH, and asserts a wording only that path gives, since "waits in the outbox" appears in both renderings.
+- The refusal enters the login gate, so a second submission in the same operation fails without dialling, with the gate's "(the server refused this password earlier ...)" appended.
+- A migrated test that still passes may no longer run the branch it was written for: after moving a row to another fake, break the branch on purpose and see the row fail.

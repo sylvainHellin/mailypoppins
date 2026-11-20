@@ -100,6 +100,7 @@ All notable changes to this project are documented in this file.
 - New-mail notifications in the desktop app (PERSO-186): the daemon announces each sync's new inbox mail once the blocked senders and mail hooks ran, leaving out a first sync's backlog, mail moved to Junk, mail already read and the account's own messages, and one client shows it, the desktop app when open, else the TUI with `notifications = true`.
 
 ### Changed
+- Tests: every send, RSVP and iMIP row runs over the fake SMTP and IMAP servers, and the `MAILYPOPPINS_DAEMON_FAKE_TRANSPORT` hook is gone from the daemon, which no longer carries a test-only transport (PERSO-331).
 - Sending a mirrored draft whose server copy changed since the last sync (an Outlook save, mp on the other machine pushing over it) is refused with nothing removed, the message says so, and the change is pulled at once for you to review and send again; this applies to IMAP accounts too (PERSO-182).
 - On a Graph account, a draft too large for one Graph request (about 2.6 MB as a message) stays local and can still be sent; its push shows as failed once with the reason, and an edit of the draft or a smaller attachment pushes it again (PERSO-182).
 - The editor `mp edit`, `mp signature edit`, `mp config open`, the TUI and the desktop app start is now chosen by one rule: the first of `$VISUAL` and `$EDITOR` that names a terminal editor, else the first one set, else `hx`; a value with arguments (`code --wait`, `emacs -nw`) works in all of them (PERSO-320).
