@@ -40,6 +40,11 @@ impl MessageRowRef for MessageRow {
 /// in full rather than resolved by a rule the user cannot see; two rows in one
 /// mailbox (two server copies) are spelled with their UID, which a selector
 /// that ends in one narrows to (PERSO-239).
+///
+/// The selector answered names the copy resolved: a row whose mailbox holds a
+/// twin keeps its UID, as a listing prints it, so a client that resolves first
+/// and addresses the row again by the answered selector (`mp export`, `mp
+/// save`) reaches the same copy instead of an ambiguity.
 pub fn resolve_received(store: &Store, query: &SelectorQuery) -> Result<(MessageRow, Selector)> {
     debug_assert_eq!(query.namespace, Namespace::Received);
     // Ingest stores the header verbatim, brackets and all, while the selector
@@ -51,6 +56,9 @@ pub fn resolve_received(store: &Store, query: &SelectorQuery) -> Result<(Message
     if rows.is_empty() {
         rows = read::find_by_message_id(store, &query.account, key)?;
     }
+    // Every copy of the Message-ID is among the rows, so their twins are the
+    // mailbox's, asked before any filter narrows them away.
+    let twins = Twins::among(rows.iter());
     if let Some(mailbox) = query.mailbox.as_deref() {
         rows.retain(|row| row.mailbox == mailbox);
     }
@@ -61,7 +69,7 @@ pub fn resolve_received(store: &Store, query: &SelectorQuery) -> Result<(Message
         0 => Err(not_found(query)),
         1 => {
             let row = rows.remove(0);
-            let selector = Selector::for_message(&query.account, &row);
+            let selector = Selector::for_listed(&query.account, &row, &twins);
             Ok((row, selector))
         }
         _ => Err(ambiguous(
@@ -71,6 +79,17 @@ pub fn resolve_received(store: &Store, query: &SelectorQuery) -> Result<(Message
                 .collect(),
         )),
     }
+}
+
+/// The selector a client addresses one stored row by: the canonical one,
+/// narrowed to the row's UID when its mailbox holds a twin (PERSO-244).
+///
+/// What every single-row answer carries (`message.get`, `message.attachments`,
+/// a mutation's), so the selector a client is handed back resolves to the
+/// copy it was handed for.
+pub fn of_row(store: &Store, account: &str, row: &MessageRow) -> Result<Selector> {
+    let twins = read::twins_of(store, account, std::iter::once(row))?;
+    Ok(Selector::for_listed(account, row, &twins))
 }
 
 /// Resolve a draft query to exactly one indexed draft, plus its canonical

@@ -1315,11 +1315,13 @@ pub(super) fn attachments(params: &Value, accounts: &[AccountConfig]) -> Result<
             row.mailbox, row.uid
         ))
     })?;
-    attachment_answer(
-        &name,
-        Selector::for_message(&name, &row).to_string(),
-        &parts,
-    )
+    let selector = crate::selector::of_row(&store, &name, &row).map_err(|e| {
+        internal(format!(
+            "reading the copies of {name}:{}/{}: {e:#}",
+            row.mailbox, row.uid
+        ))
+    })?;
+    attachment_answer(&name, selector.to_string(), &parts)
 }
 
 /// The `message.attachments` answer over `parts`, a message's parts in stored
@@ -2101,7 +2103,14 @@ async fn mutate_with<E: OpExecutor>(
     let store = Store::open(crate::config::store_path(&name))
         .map_err(|e| internal(format!("opening the store of {name}: {e:#}")))?;
     let row = address(params, &store, &name)?;
-    let selector = Selector::for_message(&name, &row).to_string();
+    let selector = crate::selector::of_row(&store, &name, &row)
+        .map_err(|e| {
+            internal(format!(
+                "reading the copies of {name}:{}/{}: {e:#}",
+                row.mailbox, row.uid
+            ))
+        })?
+        .to_string();
     // A move into the mailbox the message already sits in would owe the
     // server a MOVE onto itself, which mints a new UID on some servers for
     // nothing (PERSO-235). Refused before the backend, like every other

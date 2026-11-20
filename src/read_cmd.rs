@@ -261,8 +261,14 @@ pub fn shown_message(
         log::warn!("[show] attachments of message {}: {e:#}", row.id);
         Vec::new()
     });
+    // The copy's own selector, so a client that addresses the row again by it
+    // reaches this copy and not its twin.
+    let selector = crate::selector::of_row(store, account, row).unwrap_or_else(|e| {
+        log::warn!("[show] the copies of message {}: {e:#}", row.id);
+        Selector::for_message(account, row)
+    });
     ShownMessage {
-        selector: Selector::for_message(account, row).to_string(),
+        selector: selector.to_string(),
         account: account.to_string(),
         mailbox: row.mailbox.clone(),
         message_id: row.message_id.clone(),
