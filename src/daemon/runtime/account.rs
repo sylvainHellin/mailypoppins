@@ -2173,6 +2173,168 @@ mod tests {
         assert!(runtime.backlog_owed());
     }
 
+    /// A body hook that records the kind of every tick it runs and holds each
+    /// one until `release` is notified, notifying `entered` once inside.
+    fn held_hooks(
+        seen: &Arc<Mutex<Vec<TickKind>>>,
+        entered: &Arc<tokio::sync::Notify>,
+        release: &Arc<tokio::sync::Notify>,
+    ) -> TickHooks {
+        let mut hooks = quiet_hooks();
+        hooks.body = {
+            let (seen, entered, release) =
+                (Arc::clone(seen), Arc::clone(entered), Arc::clone(release));
+            Arc::new(move |ctx: TickContext| {
+                lock(&seen).push(ctx.kind);
+                let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(())
+                }
+                .boxed()
+            })
+        };
+        hooks
+    }
+
+    /// A full request that finds a quick tick in flight (the watcher's, the
+    /// scheduler's) waits for it to end and then runs a full tick of its own:
+    /// taking the quick tick's outcome would report a full sync that never
+    /// ran, with the older bodies still unfetched.
+    #[tokio::test]
+    async fn a_full_request_waits_out_a_quick_tick_and_then_runs_its_own() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = Arc::new(
+            AccountRuntime::start_at_with_hooks(
+                dir.path(),
+                config("alpha", 0),
+                1,
+                held_hooks(&seen, &entered, &release),
+            )
+            .expect("a free lock"),
+        );
+
+        let quick = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.tick(TickKind::Quick).await }
+        });
+        entered.notified().await;
+        let full = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.tick(TickKind::Full).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !full.is_finished(),
+            "the full request waits for the quick tick"
+        );
+        release.notify_one();
+        let quick = quick.await.expect("the quick tick");
+        assert_eq!(quick.kind, TickKind::Quick);
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap_or_else(|_| panic!("no full body ran after the quick tick: {:?}", lock(&seen)));
+        release.notify_one();
+        let full = full.await.expect("the full tick");
+        assert_eq!(full.kind, TickKind::Full, "{full:?}");
+        assert!(!full.joined, "it ran a body of its own");
+        assert_eq!(*lock(&seen), [TickKind::Quick, TickKind::Full]);
+    }
+
+    /// A quick request and a full one that find a full tick in flight join
+    /// it: it covers whatever either asked for.
+    #[tokio::test]
+    async fn every_request_joins_a_full_tick_in_flight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = Arc::new(
+            AccountRuntime::start_at_with_hooks(
+                dir.path(),
+                config("alpha", 0),
+                1,
+                held_hooks(&seen, &entered, &release),
+            )
+            .expect("a free lock"),
+        );
+
+        let full = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.tick(TickKind::Full).await }
+        });
+        entered.notified().await;
+        let joiners: Vec<_> = [TickKind::Quick, TickKind::Full]
+            .into_iter()
+            .map(|kind| {
+                let runtime = Arc::clone(&runtime);
+                tokio::spawn(async move { runtime.tick(kind).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release.notify_one();
+        assert!(!full.await.expect("the full tick").joined);
+        for joiner in joiners {
+            let joined = joiner.await.expect("a joiner");
+            assert!(joined.joined && joined.kind == TickKind::Full, "{joined:?}");
+        }
+        assert_eq!(*lock(&seen), [TickKind::Full], "one body ran");
+    }
+
+    /// A full request cancelled while it waits behind a quick tick ends
+    /// stopped at once, having run nothing, and leaves the quick tick it only
+    /// waited behind to run to its end: that tick is not the sync the cancel
+    /// was about.
+    #[tokio::test]
+    async fn a_full_request_cancelled_while_it_waits_leaves_the_quick_tick_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = Arc::new(
+            AccountRuntime::start_at_with_hooks(
+                dir.path(),
+                config("alpha", 0),
+                1,
+                held_hooks(&seen, &entered, &release),
+            )
+            .expect("a free lock"),
+        );
+
+        let quick = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.tick(TickKind::Quick).await }
+        });
+        entered.notified().await;
+        let cancel = CancelToken::new();
+        let full = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let cancel = cancel.clone();
+            async move {
+                runtime
+                    .tick_until(TickKind::Full, None, None, Some(&cancel))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+        let full = tokio::time::timeout(Duration::from_millis(500), full)
+            .await
+            .expect("the cancel ends the wait at once")
+            .expect("the full request");
+        assert!(full.stopped && full.phases.is_empty(), "{full:?}");
+        assert!(full.sync.is_none(), "it ran nothing to report");
+
+        release.notify_one();
+        let quick = quick.await.expect("the quick tick");
+        assert!(!quick.stopped, "the quick tick ran to its end: {quick:?}");
+        assert_eq!(*lock(&seen), [TickKind::Quick]);
+    }
+
     /// A body that fails is reported on the outcome, and the tail still ran.
     #[tokio::test]
     async fn a_failing_body_is_carried_and_the_tail_still_runs() {
