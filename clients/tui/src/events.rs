@@ -772,6 +772,24 @@ impl App {
         }
     }
 
+    /// The line of each of `awaited`'s syncs whose daemon died without
+    /// announcing its stop, found gone by the next daemon's snapshot.
+    ///
+    /// The desktop's words (`clients/desktop/src/app/pending.ts` with the
+    /// reason `clients/desktop/src-tauri/src/session.rs` gives a restarted
+    /// daemon), kept as a second string since the desktop builds its own in
+    /// TypeScript; `sync_cancel_tests.rs` pins this one.
+    pub(super) fn say_syncs_dropped(&mut self, awaited: &[Awaited]) {
+        for awaited in awaited {
+            if let Awaited::Quick { account, .. } | Awaited::Full { account, .. } = awaited {
+                self.set_status_level(
+                    format!("Sync of {account} was dropped: the daemon restarted"),
+                    StatusLevel::Error,
+                );
+            }
+        }
+    }
+
     /// The daemon is going away (P6-U4).
     ///
     /// One status line and nothing else. The socket closes a moment later, and

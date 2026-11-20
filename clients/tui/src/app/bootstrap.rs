@@ -170,9 +170,12 @@ impl App {
             self.bg_count = self.bg_count.saturating_sub(orphaned.len());
         }
         // A sync the announced stop left without its end says what
-        // `mp sync` and the desktop say of it.
+        // `mp sync` and the desktop say of it; one whose daemon died without
+        // announcing a stop says it was dropped, as the desktop does.
         if stopping {
             self.say_syncs_cut_by_the_stop(&orphaned);
+        } else {
+            self.say_syncs_dropped(&orphaned);
         }
         // The daemon's current complaints, in its own report order, landed the
         // same way a `diagnostic.check_changed` is (P6-U8): a window that opens
