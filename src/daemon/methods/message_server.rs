@@ -1759,6 +1759,50 @@ mod tests {
         );
     }
 
+    /// A hit names the copy that was hit: a self-sent message stored in the
+    /// inbox and in sent, hit in sent, resolves to the sent row, not to the
+    /// row that sorts first. A hit in a mailbox that holds no copy keeps
+    /// naming a stored one, which is still the message.
+    #[test]
+    fn a_hit_resolves_to_the_copy_in_its_own_mailbox() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("store.sqlite3")).unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let mid = "<self@x>";
+        for (mailbox, uid) in [("inbox", 7), ("sent", 3)] {
+            ingest_into(
+                &store,
+                &blobs,
+                "acct",
+                mailbox,
+                uid,
+                &email(mid),
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let row_in = |mailbox: &str| {
+            read::find_by_message_id(&store, "acct", mid)
+                .unwrap()
+                .into_iter()
+                .find(|row| row.mailbox == mailbox)
+                .unwrap()
+                .id
+        };
+
+        let hit = to_hit(Some(&store), "acct", "sent", &email(mid));
+        assert_eq!(hit.selector.as_deref(), Some("mp://acct/sent/self@x"));
+        assert_eq!(hit.row_id, Some(row_in("sent")));
+
+        let hit = to_hit(Some(&store), "acct", "inbox", &email(mid));
+        assert_eq!(hit.selector.as_deref(), Some("mp://acct/inbox/self@x"));
+        assert_eq!(hit.row_id, Some(row_in("inbox")));
+
+        let hit = to_hit(Some(&store), "acct", "archive", &email(mid));
+        assert!(hit.selector.is_some(), "{hit:?}");
+    }
+
     /// A Graph hit `message.fetch` lands joins its stored parent at ingest and
     /// reads as asked, so the next sync's re-thread has no reason to list the
     /// folder for it (PERSO-147).
