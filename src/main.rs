@@ -4181,11 +4181,16 @@ fn paint(line: &str) -> String {
 
 /// Whether a refusal is the daemon saying this account has no server at all.
 fn is_local_only(error: &mp_protocol::RpcError) -> bool {
+    refused_as(error, "local_only")
+}
+
+/// Whether a refusal is `-32006` with the account state `state`.
+fn refused_as(error: &mp_protocol::RpcError, state: &str) -> bool {
     error.code == mp_protocol::ErrorCode::AccountNotReady.code()
         && error
             .data
             .as_ref()
-            .map(|data| data["state"] == "local_only")
+            .map(|data| data["state"] == state)
             .unwrap_or(false)
 }
 
@@ -4280,6 +4285,19 @@ async fn sync_one_routed(
             );
             return Synced::Skipped;
         }
+        // A calendar-only account (PERSO-318) asked for a dry run or a
+        // mailbox, neither of which reaches its calendar.
+        Err(error) if refused_as(&error, "calendar_only") => {
+            println!(
+                "{}",
+                paint(&format!(
+                    "- {}: syncs only its calendar, which a dry run or a mailbox does not \
+                     reach; skipped",
+                    account.name
+                ))
+            );
+            return Synced::Skipped;
+        }
         Err(error) => return Synced::Failed(error.message),
     };
 
@@ -4311,6 +4329,15 @@ async fn sync_one_routed(
                 account.name
             ))
         );
+        return Synced::Ran;
+    }
+    // A calendar-only account's pass is its calendar sync (PERSO-318).
+    if let Ok(synced) =
+        serde_json::from_value::<mp_protocol::calendar::CalendarSynced>(result["calendar"].clone())
+    {
+        for line in mp_client::format::calendar_synced_cli_lines(&synced) {
+            println!("{}", paint(&line));
+        }
         return Synced::Ran;
     }
     if let Ok(outcome) =

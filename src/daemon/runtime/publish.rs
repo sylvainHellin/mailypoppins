@@ -278,6 +278,7 @@ mod tests {
             sync: None,
             contacts: None,
             calendar_changed: false,
+            calendar: None,
         }
     }
 

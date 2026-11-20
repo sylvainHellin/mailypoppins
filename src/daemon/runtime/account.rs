@@ -213,6 +213,12 @@ pub struct TickOutcome {
     /// `None`, and on a runtime built with injected hooks, which syncs no
     /// calendar.
     pub calendar_changed: bool,
+    /// What the calendar sync did on an account whose one server is its
+    /// calendar's (PERSO-318), whose tick is that sync alone: `None` on every
+    /// other account, whose tick reports its mail pass, and on a calendar
+    /// sync that failed, whose error is the tick's [`TickOutcome::error`].
+    /// A joiner keeps it, since it is a report and commits nothing.
+    pub calendar: Option<mp_protocol::calendar::CalendarSynced>,
 }
 
 /// What one [`AccountRuntime::drain`] did.
@@ -851,6 +857,7 @@ impl AccountRuntime {
                 sync: None,
                 contacts: None,
                 calendar_changed: false,
+                calendar: None,
             };
         }
 
@@ -873,6 +880,7 @@ impl AccountRuntime {
                     sync: None,
                     contacts: None,
                     calendar_changed: false,
+                    calendar: None,
                 };
             }
             match running.as_ref() {
@@ -918,6 +926,7 @@ impl AccountRuntime {
                             sync: None,
                             contacts: None,
                             calendar_changed: false,
+                            calendar: None,
                         };
                     }
                 }
@@ -942,6 +951,7 @@ impl AccountRuntime {
                     sync: None,
                     contacts: None,
                     calendar_changed: false,
+                    calendar: None,
                 }
             } else {
                 let outcome = if self.config.syncs_only_a_calendar() {
@@ -958,6 +968,7 @@ impl AccountRuntime {
                         sync: None,
                         contacts: None,
                         calendar_changed: false,
+                        calendar: None,
                     }
                 } else {
                     self.run_tick(kind, stop).await
@@ -974,7 +985,9 @@ impl AccountRuntime {
         // mutation asked for does not wait behind it.
         let mut outcome = outcome;
         if !outcome.blocked {
-            outcome.calendar_changed = self.sync_calendar().await;
+            let polled = self.sync_calendar().await;
+            outcome.calendar_changed = polled.changed();
+            self.report_calendar(polled, &mut outcome);
         }
         // Cleared first: the next `tick()` after this one returns must start a
         // fresh body rather than join a run that is over.
@@ -1096,6 +1109,7 @@ impl AccountRuntime {
             error,
             contacts,
             calendar_changed: false,
+            calendar: None,
         }
     }
 
@@ -1103,19 +1117,54 @@ impl AccountRuntime {
     /// whatever it did, since the calendar reaches its own server API, and
     /// off the reactor, since the sync holds a store across its awaits.
     /// `true` when the account's calendar cache moved.
-    async fn sync_calendar(&self) -> bool {
+    async fn sync_calendar(&self) -> crate::calendar_sync::Polled {
+        use crate::calendar_sync::Polled;
         if !self.calendar {
-            return false;
+            return Polled::NoBackend;
         }
         let cfg = Arc::clone(&self.config);
         off_thread("the calendar sync", move || async move {
             crate::calendar_sync::poll_account(&cfg, chrono::Utc::now()).await
         })
         .await
-        .unwrap_or_else(|e| {
-            warn!("[calendar] {e:#}");
-            false
+        .unwrap_or_else(|e| Polled::Failed {
+            error: format!("{e:#}"),
+            missing_scope: false,
         })
+    }
+
+    /// Fold what the calendar sync did into the tick's outcome. On an
+    /// account whose one server is its calendar's (PERSO-318) it is the
+    /// tick's own outcome, its failure the tick's error; on every other
+    /// account the tick reports the mail pass, and a failed calendar sync is
+    /// only logged, a sign-in without the calendar scope quietly, since the
+    /// diagnostics already prompt for the re-login.
+    fn report_calendar(&self, polled: crate::calendar_sync::Polled, outcome: &mut TickOutcome) {
+        use crate::calendar_sync::Polled;
+        let calendar_only = self.config.syncs_only_a_calendar();
+        match polled {
+            Polled::NoBackend => {}
+            Polled::Synced(report) if calendar_only => {
+                outcome.calendar = Some(mp_protocol::calendar::CalendarSynced {
+                    calendars: report.calendars,
+                    upserts: report.upserts,
+                    removed: report.removed,
+                    failed: report.failed,
+                });
+            }
+            Polled::Synced(_) => {}
+            Polled::Failed { error, .. } if calendar_only => outcome.error = Some(error),
+            Polled::Failed {
+                missing_scope: true,
+                error,
+            } => debug!("[calendar] {}: not syncing: {error}", self.account),
+            Polled::Failed { error, .. } => {
+                warn!(
+                    "[calendar] {}: the calendar sync failed: {error}",
+                    self.account
+                )
+            }
+        }
     }
 
     /// Fold the correspondents a tick's pass inserted into the account's

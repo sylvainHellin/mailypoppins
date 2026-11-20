@@ -93,6 +93,7 @@ fn export_into(dir: &Path) -> usize {
         calendar::EventDeleteParams,
         calendar::EventDeleteResult,
         calendar::CalendarChanged,
+        calendar::CalendarSynced,
         daemon::ConnectionQueue,
         diagnostic::CheckStatus,
         diagnostic::HealthCheck,

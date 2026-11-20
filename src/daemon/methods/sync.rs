@@ -33,6 +33,13 @@
 //! [`super::account::ready_account`] because a sync is what *gives* an account
 //! its store: requiring one first would refuse every first sync.
 //!
+//! An account whose one server is its calendar's (PERSO-318) is no such
+//! account: its pass is its runtime's tick, which for it is the calendar sync
+//! alone, and answers `{blocked: false, outcome: null, calendar: <what the
+//! sync did>}` or fails with the calendar's error ([`calendar_pass`]). A dry
+//! run or a mailbox reaches no calendar, and is `-32006` with
+//! `state: "calendar_only"`.
+//!
 //! ## The five phases, and the drain reports
 //!
 //! A pass is [`run_tick_with_drains`]: the outbox then the mutation queue at the
@@ -255,7 +262,7 @@ fn pass_request(
         }
     }
     let name = string_param(params, "account")?;
-    let account = syncable_account(&snapshot.accounts, &name)?;
+    let account = pass_account(&snapshot.accounts, &name, params)?;
 
     let mailbox = match params.get("mailbox") {
         None | Some(Value::Null) => None,
@@ -336,6 +343,38 @@ pub(super) fn syncable_account<'a>(
             code: ErrorCode::AccountNotReady.code(),
             message: crate::config::retired_oauth2_message(name),
             data: Some(json!({"account": name, "state": "blocked"})),
+        });
+    }
+    super::account::opened(name)?;
+    Ok(account)
+}
+
+/// The account a `sync.quick` or `sync.full` of `params` runs on:
+/// [`syncable_account`], except that an account whose one server is its
+/// calendar's (PERSO-318) is synced too, its pass being its calendar sync
+/// alone, and is `-32006` with `state: "calendar_only"` for a dry run or a
+/// mailbox, neither of which reaches a calendar.
+fn pass_account<'a>(
+    accounts: &'a [AccountConfig],
+    name: &str,
+    params: &Value,
+) -> Result<&'a AccountConfig, RpcError> {
+    let account = super::account::configured_account(accounts, name)?;
+    if !account.syncs_only_a_calendar() {
+        return syncable_account(accounts, name);
+    }
+    let named = |key: &str| {
+        params
+            .get(key)
+            .is_some_and(|v| !v.is_null() && *v != json!(false))
+    };
+    if named("dry_run") || named("mailbox") {
+        return Err(RpcError {
+            code: ErrorCode::AccountNotReady.code(),
+            message: format!(
+                "{name} syncs only its calendar, which a dry run or a mailbox does not reach"
+            ),
+            data: Some(json!({"account": name, "state": "calendar_only"})),
         });
     }
     super::account::opened(name)?;
@@ -629,6 +668,9 @@ async fn run_pass_to_end(
     canonical: Arc<CanonicalState>,
 ) {
     handle.set_running();
+    if request.account.syncs_only_a_calendar() {
+        return calendar_pass(request, handle, runtimes, canonical).await;
+    }
     let stop = pass_stop(request.method, handle.token.clone());
     // Before the drains, exactly as `mp sync` resolved its targets before its
     // tick: a `--mailbox` nothing configures must not drain a queue on its way
@@ -718,6 +760,75 @@ async fn run_pass_to_end(
             handle.succeed(ran_result(Some(&outcome)));
         }
     }
+}
+
+/// The pass of an account whose one server is its calendar's (PERSO-318):
+/// its runtime's tick, which for it is the calendar sync alone, so it
+/// answers the calendar's report or fails with the calendar's error. An
+/// account whose runtime is not up yet (its store is being created) has the
+/// calendar synced here, under the same calendar lock, and [`run_pass`] then
+/// starts its runtime.
+async fn calendar_pass(
+    request: PassRequest,
+    handle: OperationHandle,
+    runtimes: Arc<RuntimeTable>,
+    canonical: Arc<CanonicalState>,
+) {
+    if let Err(e) = super::open_secrets(&request.account.name, request.secrets) {
+        return handle.fail(DomainError::from(e));
+    }
+    let name = request.account.name.as_str();
+    if runtimes.get(name).is_some() {
+        let stop = pass_stop(request.method, handle.token.clone());
+        let outcome = tick_and_commit_until(
+            &runtimes,
+            &canonical,
+            name,
+            request.kind,
+            stop,
+            &handle.token,
+        )
+        .await
+        .filter(|outcome| !outcome.blocked);
+        if handle.token.is_cancelled() {
+            return;
+        }
+        return match outcome {
+            None => handle.succeed(blocked_result()),
+            Some(outcome) => match outcome.error {
+                Some(error) => handle.fail(DomainError::internal(error)),
+                None => handle.succeed(calendar_result(outcome.calendar.unwrap_or_default())),
+            },
+        };
+    }
+    use crate::calendar_sync::Polled;
+    let cfg = request.account.clone();
+    let polled = off_thread("the calendar sync", move || async move {
+        crate::calendar_sync::poll_account(&cfg, chrono::Utc::now()).await
+    })
+    .await;
+    match polled {
+        Ok(Polled::Synced(report)) => {
+            if report.changed() {
+                canonical.publish(super::calendar::calendar_changed(name));
+            }
+            handle.succeed(calendar_result(mp_protocol::calendar::CalendarSynced {
+                calendars: report.calendars,
+                upserts: report.upserts,
+                removed: report.removed,
+                failed: report.failed,
+            }))
+        }
+        Ok(Polled::NoBackend) => handle.succeed(calendar_result(Default::default())),
+        Ok(Polled::Failed { error, .. }) => handle.fail(DomainError::internal(error)),
+        Err(e) => handle.fail(DomainError::internal(format!("{e:#}"))),
+    }
+}
+
+/// The result of a calendar-only account's pass (PERSO-318): no mail
+/// outcome, and what its calendar sync did.
+fn calendar_result(synced: mp_protocol::calendar::CalendarSynced) -> Value {
+    json!({"blocked": false, "outcome": null, "calendar": synced})
 }
 
 /// Hand the new inbox mail of a guarded pass to the account's runtime, when

@@ -509,6 +509,53 @@ fn a_quick_sync_starts_an_operation_and_polls_nothing() {
     );
 }
 
+/// A sync key on a calendar-only account (PERSO-318) starts the same
+/// `sync.quick` `mp sync` does, instead of refusing it as an account without
+/// IMAP, and its finish says the calendar synced.
+#[test]
+fn a_sync_of_a_calendar_only_account_says_its_calendar_synced() {
+    let fixture = Fixture::new();
+    seed_inbox();
+    let mut app = app_on_inbox(&fixture);
+    let calendar_only = AccountConfig {
+        name: ACCOUNT.to_string(),
+        calendar_backend: Some(crate::config::CalendarBackendKind::Ews),
+        ..Default::default()
+    };
+    app.account_config = calendar_only.clone();
+    app.accounts[0].account_config = calendar_only;
+    app.accounts[0].credentials = Some(crate::tui::app::Credentials::default());
+    watermarked(&mut app);
+    fixture.forget();
+
+    dispatch(&mut app, &fixture, &Action::Fetch);
+    assert_eq!(
+        fixture.methods(),
+        vec!["sync.quick".to_string()],
+        "{:?}",
+        app.status_message
+    );
+    let id = fixture.operation_id("sync.quick");
+    app.apply_event(&envelope(
+        INSTANCE,
+        WATERMARK + 1,
+        "operation.finished",
+        json!({
+            "operation_id": id,
+            "state": "succeeded",
+            "result": {
+                "blocked": false,
+                "outcome": null,
+                "calendar": {"calendars": 2, "upserts": 3, "removed": 1, "failed": []},
+            },
+        }),
+    ));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Calendar synced: 2 calendars, 3 events updated, 1 removed")
+    );
+}
+
 /// The finished operation lands where the poll's answer landed: on the status
 /// line, and notifies nobody.
 ///

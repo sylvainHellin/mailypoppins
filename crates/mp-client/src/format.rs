@@ -171,6 +171,38 @@ pub fn sync_status_line(outcome: &SyncCompleted) -> String {
     line
 }
 
+/// What the calendar sync of a calendar-only account's pass did (PERSO-318),
+/// the TUI's status line: how many calendars, and the events it wrote and
+/// removed, then each calendar that failed.
+pub fn calendar_synced_line(synced: &mp_protocol::calendar::CalendarSynced) -> String {
+    let mut line = format!(
+        "Calendar synced: {} calendar{}, {} event{} updated, {} removed",
+        synced.calendars,
+        if synced.calendars == 1 { "" } else { "s" },
+        synced.upserts,
+        if synced.upserts == 1 { "" } else { "s" },
+        synced.removed
+    );
+    for (calendar, why) in &synced.failed {
+        line.push_str(&format!("; {calendar} failed: {why}"));
+    }
+    line
+}
+
+/// `mp sync`'s lines for the same pass: [`calendar_synced_line`]'s first
+/// sentence under a check mark, and a warning per calendar that failed.
+pub fn calendar_synced_cli_lines(synced: &mp_protocol::calendar::CalendarSynced) -> Vec<String> {
+    let clean = mp_protocol::calendar::CalendarSynced {
+        failed: Vec::new(),
+        ..synced.clone()
+    };
+    let mut lines = vec![format!("\u{2713} {}", calendar_synced_line(&clean))];
+    for (calendar, why) in &synced.failed {
+        lines.push(format!("\u{26a0} calendar {calendar} failed: {why}"));
+    }
+    lines
+}
+
 /// What the sync status says of the messages the sync has given up on
 /// (PERSO-334): how many, and that the server still holds them.
 pub fn given_up_headline(count: usize) -> String {
@@ -1497,6 +1529,30 @@ mod tests {
             outbox_discarded_line(7, "<m@example.com>", Some(&local)),
             "  \u{2713} discarded row 7 (<m@example.com>); its invitation version stays on the \
              agenda, its copy in this machine's Sent mailbox"
+        );
+    }
+
+    /// PERSO-318: a calendar-only account's pass reads as its calendar sync,
+    /// a calendar that failed beside the others named with why.
+    #[test]
+    fn a_calendar_sync_names_its_counts_and_each_failed_calendar() {
+        use super::{calendar_synced_cli_lines, calendar_synced_line};
+        let synced = mp_protocol::calendar::CalendarSynced {
+            calendars: 1,
+            upserts: 1,
+            removed: 0,
+            failed: vec![("room-1".into(), "access denied".into())],
+        };
+        assert_eq!(
+            calendar_synced_line(&synced),
+            "Calendar synced: 1 calendar, 1 event updated, 0 removed; room-1 failed: access denied"
+        );
+        assert_eq!(
+            calendar_synced_cli_lines(&synced),
+            [
+                "\u{2713} Calendar synced: 1 calendar, 1 event updated, 0 removed",
+                "\u{26a0} calendar room-1 failed: access denied",
+            ]
         );
     }
 

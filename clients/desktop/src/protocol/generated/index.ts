@@ -29,6 +29,7 @@ export type { CalendarRemindersResult } from "./CalendarRemindersResult";
 export type { CalendarSchedule } from "./CalendarSchedule";
 export type { CalendarScheduleItem } from "./CalendarScheduleItem";
 export type { CalendarSeries } from "./CalendarSeries";
+export type { CalendarSynced } from "./CalendarSynced";
 export type { CalendarTimeSlot } from "./CalendarTimeSlot";
 export type { CalendarViewParams } from "./CalendarViewParams";
 export type { CalendarViewResult } from "./CalendarViewResult";

@@ -620,7 +620,9 @@ fn start_pass(app: &mut App, commands: &dyn Queries, method: &str, label: &str, 
     if super::actions::sync_is_blocked(app) {
         return super::actions::park_until_idle(app, action, label);
     }
-    if !app.is_graph() && !app.has_imap() {
+    // A calendar-only account (PERSO-318) has no IMAP and a pass all the same:
+    // its calendar sync, as `mp sync` runs it.
+    if !app.is_graph() && !app.has_imap() && !app.account_config.syncs_only_a_calendar() {
         return app.set_status_level("IMAP not configured".to_string(), StatusLevel::Error);
     }
     let account = app.account_config.name.clone();
@@ -1075,6 +1077,12 @@ fn rebuild_contacts(app: &mut App, commands: &dyn Queries) {
 fn sync_status_line(account: &str, settled: &Value) -> String {
     if settled["blocked"].as_bool().unwrap_or(false) {
         return format!("{SYNC_SKIPPED_MARKER} '{account}'; leaving the ingest to it");
+    }
+    // A calendar-only account's pass is its calendar sync (PERSO-318).
+    if let Ok(synced) =
+        serde_json::from_value::<mp_protocol::calendar::CalendarSynced>(settled["calendar"].clone())
+    {
+        return mp_client::format::calendar_synced_line(&synced);
     }
     match serde_json::from_value::<SyncCompleted>(settled["outcome"].clone()) {
         Ok(outcome) => mp_client::format::sync_status_line(&outcome),

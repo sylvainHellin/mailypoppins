@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
-use log::{debug, info, warn};
+use log::{info, warn};
 
 use crate::calendar_backend::{backend_for, BackendResult, CalendarBackend, CalendarBackendError};
 use crate::calendar_model::{window_for, EventId};
@@ -73,14 +73,38 @@ impl SyncReport {
     }
 }
 
+/// What [`poll_account`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Polled {
+    /// The account has no calendar backend.
+    NoBackend,
+    /// The sync ran; some calendars may have failed beside the others.
+    Synced(SyncReport),
+    /// The sync failed as a whole, with why.
+    Failed {
+        error: String,
+        /// The sign-in lacks the calendar scope, which the diagnostics
+        /// already prompt about, so a tick that reports the mail pass
+        /// leaves it out of the log.
+        missing_scope: bool,
+    },
+}
+
+impl Polled {
+    /// Whether the sync moved the account's calendar cache.
+    pub fn changed(&self) -> bool {
+        matches!(self, Polled::Synced(report) if report.changed())
+    }
+}
+
 /// The calendar half of a daemon tick on `account`: connect its backend and
-/// sync it, under [`account_lock`]. `true` when the cache moved.
+/// sync it, under [`account_lock`].
 ///
-/// An account without a backend does nothing. A token without the calendar
-/// scope is skipped quietly, since the diagnostics already prompt for the
-/// re-login, and every other failure is logged: the tick reports the mail
-/// pass, never the calendar.
-pub async fn poll_account(account: &AccountConfig, now: DateTime<Utc>) -> bool {
+/// An account without a backend does nothing. Nothing is logged here: the
+/// tick of a mail account reports the mail pass and logs this failure
+/// beside it, and the tick of a calendar-only account (PERSO-318) reports
+/// this as its own outcome.
+pub async fn poll_account(account: &AccountConfig, now: DateTime<Utc>) -> Polled {
     let name = account.name.as_str();
     let result = async {
         let Some(backend) = backend_for(account).await? else {
@@ -93,15 +117,12 @@ pub async fn poll_account(account: &AccountConfig, now: DateTime<Utc>) -> bool {
     }
     .await;
     match result {
-        Ok(report) => report.is_some_and(|report| report.changed()),
-        Err(CalendarBackendError::MissingScope { scope }) => {
-            debug!("[calendar] {name}: not syncing, the sign-in lacks {scope}");
-            false
-        }
-        Err(err) => {
-            warn!("[calendar] {name}: the calendar sync failed: {err}");
-            false
-        }
+        Ok(None) => Polled::NoBackend,
+        Ok(Some(report)) => Polled::Synced(report),
+        Err(err) => Polled::Failed {
+            missing_scope: matches!(err, CalendarBackendError::MissingScope { .. }),
+            error: err.to_string(),
+        },
     }
 }
 

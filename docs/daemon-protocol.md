@@ -971,6 +971,11 @@ The refusal arrives before anything opens a socket, and before either drain runs
 A pass whose account is already another engine's *succeeds* and answers `{blocked: true, outcome: null}`: the holder is doing the work, so nothing ran, no session was opened and that is not this operation's failure (#0122).
 A pass that ran answers `{blocked: false, outcome: <sync.completed payload>}` and publishes the same payload as a `sync.completed` event, unless it was a dry run, whose counts describe mail that was not ingested and would read to every other client as mail that arrived.
 
+An account whose one server is its calendar's (a `calendar_backend` and no IMAP, SMTP or Graph mail, PERSO-318) is not `local_only`: its pass is its runtime's tick, which for it is the calendar sync alone, with no drain and no mail pass.
+It answers `{blocked: false, outcome: null, calendar: {calendars, upserts, removed, failed}}` (`mp_protocol::calendar::CalendarSynced`, `failed` listing each calendar that failed as `[id, why]` beside the others that synced), publishes `calendar.changed` when the cache moved and no `sync.completed`, and fails the operation with the calendar's own error when the sync failed as a whole (a missing scope, a refused login, the server unreachable).
+A `dry_run` or a `mailbox` reaches no calendar, and is `-32006` with `{account, state: "calendar_only"}`, which `mp sync` renders as a skip line like `local_only`'s.
+`mp sync` prints `✓ Calendar synced: N calendars, M events updated, K removed` and a `⚠` line per failed calendar, and the TUI's sync keys the same sentence on the status line, where they printed the `local_only` skip and said `IMAP not configured`; the desktop's sync, silent on success like a mail pass, says `Sync of <account> failed: <the calendar's error>`.
+
 Neither answer lists the mail the pass brought in: new inbox mail worth a notification reaches every client as `mail.arrived`, once the blocked senders and the hooks have judged it (PERSO-186, PERSO-306).
 
 Each of the five slots of a tick is one `operation.progress` report whose `phase` is one of `head_outbox`, `head_mutations`, `body`, `tail_outbox`, `tail_mutations`, in that order (#0114).

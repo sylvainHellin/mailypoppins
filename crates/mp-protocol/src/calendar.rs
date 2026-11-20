@@ -997,6 +997,23 @@ pub struct CalendarChanged {
     pub account: String,
 }
 
+/// What the calendar sync of a `sync.quick` or `sync.full` did, its
+/// `calendar` member, on an account whose one server is its calendar's
+/// (PERSO-318): the pass of such an account is that sync alone. Absent from
+/// the answer of every other account, whose pass reports its mail.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CalendarSynced {
+    /// The calendars the backend listed.
+    pub calendars: usize,
+    /// Events written, across calendars.
+    pub upserts: usize,
+    /// Events removed, across calendars.
+    pub removed: usize,
+    /// The calendars that failed, by id, with why; the others synced.
+    pub failed: Vec<(String, String)>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

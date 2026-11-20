@@ -834,6 +834,144 @@ async fn a_calendar_only_account_syncs_its_calendar_on_its_own() {
     assert!(failed.is_empty(), "no mail pass ran for it: {failed:#?}");
 }
 
+/// Wait until `account` is ready, as `daemon.status` lists it.
+async fn until_ready(conn: &mut Connection, account: &str) {
+    let start = Instant::now();
+    loop {
+        let status = call(conn, "daemon.status", json!({})).await;
+        let ready = status["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["name"] == account && a["state"] == "ready");
+        if ready {
+            return;
+        }
+        assert!(
+            start.elapsed() < SETTLE_DEADLINE,
+            "{account} never turned ready: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// `mp sync` of a calendar-only account (PERSO-318) runs its runtime's tick,
+/// which is its calendar sync alone, and says the calendar synced, instead of
+/// skipping it as an account with no server; `--all-accounts` does the same
+/// beside a truly local-only account, which keeps its skip line.
+#[tokio::test]
+async fn mp_sync_of_a_calendar_only_account_syncs_its_calendar() {
+    let slice = Slice::start_seeded(false, &[], calendar_only, Vec::new());
+    let mut conn = slice.connect().await;
+    until_ready(&mut conn, CALENDAR_ONLY).await;
+
+    let status = run_operation(&mut conn, "sync.quick", json!({"account": CALENDAR_ONLY})).await;
+    let result = succeeded(&status);
+    assert_eq!(result["blocked"], false, "{result}");
+    assert_eq!(result["outcome"], Value::Null, "no mail pass ran: {result}");
+    assert_eq!(result["calendar"]["calendars"], 2, "{result}");
+    assert_eq!(result["calendar"]["failed"], json!([]), "{result}");
+
+    let daemon = slice.daemon.as_ref().unwrap();
+    let one = daemon.mp(&["sync", "-A", CALENDAR_ONLY]);
+    let stdout = String::from_utf8_lossy(&one.stdout);
+    assert!(
+        one.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&one.stderr)
+    );
+    assert!(
+        stdout.contains("\u{2713} Calendar synced: 2 calendars"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("local-only"), "{stdout}");
+
+    let all = daemon.mp(&["sync", "--all-accounts"]);
+    let stdout = String::from_utf8_lossy(&all.stdout);
+    assert!(
+        stdout.contains(&format!("- {IMIP}: local-only, skipped")),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains(&format!("- {CALENDAR_ONLY}: local-only")),
+        "{stdout}"
+    );
+    let section = stdout
+        .split(&format!(
+            "\u{2500}\u{2500} {CALENDAR_ONLY} \u{2500}\u{2500}"
+        ))
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        section.contains("\u{2713} Calendar synced: 2 calendars"),
+        "{stdout}"
+    );
+
+    // A dry run or a mailbox has no mail to act on: skipped, saying why.
+    let dry = daemon.mp(&["sync", "-A", CALENDAR_ONLY, "--dry-run"]);
+    let stdout = String::from_utf8_lossy(&dry.stdout);
+    assert!(dry.status.success(), "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "- {CALENDAR_ONLY}: syncs only its calendar, which a dry run or a mailbox does not \
+             reach; skipped"
+        )),
+        "{stdout}"
+    );
+}
+
+/// A calendar-only account with no runtime up (its store still being
+/// created; here a daemon that starts none) has its calendar synced by the
+/// pass itself, the report the same.
+#[tokio::test]
+async fn a_calendar_only_pass_with_no_runtime_syncs_the_calendar_itself() {
+    let slice = Slice::start_seeded(
+        false,
+        &[("MAILYPOPPINS_DAEMON_FAKE_READY_AFTER_MS", "0".to_string())],
+        calendar_only,
+        Vec::new(),
+    );
+    let mut conn = slice.connect().await;
+    let status = run_operation(&mut conn, "sync.quick", json!({"account": CALENDAR_ONLY})).await;
+    let result = succeeded(&status);
+    assert_eq!(result["calendar"]["calendars"], 2, "{result}");
+    assert_eq!(result["calendar"]["upserts"], 2, "{result}");
+    let listed = call(
+        &mut conn,
+        "calendar.list",
+        json!({"account": CALENDAR_ONLY}),
+    )
+    .await;
+    assert_eq!(listed["calendars"].as_array().unwrap().len(), 2, "{listed}");
+}
+
+/// A calendar-only account's `mp sync` whose calendar sync fails fails with
+/// the calendar's own error, never as a success or a skip.
+#[tokio::test]
+async fn mp_sync_of_a_calendar_only_account_says_why_its_calendar_failed() {
+    let slice = Slice::start_seeded(true, &[], calendar_only, Vec::new());
+    let mut conn = slice.connect().await;
+    until_ready(&mut conn, CALENDAR_ONLY).await;
+
+    let status = run_operation(&mut conn, "sync.quick", json!({"account": CALENDAR_ONLY})).await;
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(error.contains("sign-in lacks the"), "{status}");
+
+    let out = slice
+        .daemon
+        .as_ref()
+        .unwrap()
+        .mp(&["sync", "-A", CALENDAR_ONLY]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("\u{2717} {CALENDAR_ONLY}: "))
+            && stderr.contains("sign-in lacks the"),
+        "{stderr}"
+    );
+}
+
 /// `message.invite` names the server event of an invitation mail on an
 /// account with a backend, and adds nothing on one without.
 #[tokio::test]
