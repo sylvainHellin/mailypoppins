@@ -184,7 +184,9 @@ import AccordionItem from '../components/AccordionItem.astro';
             ingested stays, and the next sync goes on from there. A client cancels the syncs it
             started; when one of them had joined a sync of the same account already running (the
             daemon's own, or another client's), that sync stops with it, and the other client
-            says its sync was cancelled.
+            says its sync was cancelled. An account that syncs only a calendar is the exception: its
+            calendar sync has no point to stop at, so a cancel only stops the waiting, and the
+            calendar sync finishes in the background.
             Quitting the TUI or closing the desktop window does not stop a sync: it finishes in the
             background.
           </p>

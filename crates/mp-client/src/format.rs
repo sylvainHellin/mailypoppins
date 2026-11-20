@@ -104,6 +104,18 @@ pub fn sync_cancelled_line(account: &str) -> String {
     )
 }
 
+/// The line a cancelled sync of an account whose one server is its
+/// calendar's ends with (PERSO-318, PERSO-321): its pass is the calendar sync
+/// alone, which has no point to stop at, so the cancel only stops the client
+/// waiting and the sync finishes in the daemon, which announces what it
+/// changed to every client.
+pub fn calendar_sync_cancelled_line(account: &str) -> String {
+    format!(
+        "Stopped waiting for the calendar sync of {account}: a calendar sync is not cut short, \
+         so it finishes in the daemon"
+    )
+}
+
 /// The line a cancel that came too late earns (PERSO-321): the sync had
 /// already ended, so nothing was cancelled, and its own end says how it went.
 pub fn sync_cancel_too_late_line(account: &str) -> String {

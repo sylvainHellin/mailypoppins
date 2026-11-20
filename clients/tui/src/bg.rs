@@ -364,10 +364,21 @@ pub fn handle_bg_result(app: &mut App, result: BgResult) {
         // the open list as the daemon's counts invalidations (PERSO-133), so
         // nothing is reloaded here, and the account's sync health is left as
         // the last pass that ended left it.
-        BgResult::SyncCancelled { account } => app.set_status_level(
-            mp_client::format::sync_cancelled_line(&account),
-            StatusLevel::Warning,
-        ),
+        //
+        // An account whose one server is its calendar's (PERSO-318) has a
+        // calendar sync alone for its pass, which has no point to stop at:
+        // the line says it finishes in the daemon.
+        BgResult::SyncCancelled { account } => {
+            let calendar_only = app.accounts.iter().any(|state| {
+                state.account_config.name == account && state.account_config.syncs_only_a_calendar()
+            });
+            let line = if calendar_only {
+                mp_client::format::calendar_sync_cancelled_line(&account)
+            } else {
+                mp_client::format::sync_cancelled_line(&account)
+            };
+            app.set_status_level(line, StatusLevel::Warning)
+        }
 
         BgResult::Sync {
             account_index,

@@ -4403,14 +4403,11 @@ async fn sync_one_routed(
         // A calendar-only account (PERSO-318) asked for a dry run or a
         // mailbox, neither of which reaches its calendar.
         Err(error) if refused_as(&error, "calendar_only") => {
-            println!(
-                "{}",
-                paint(&format!(
-                    "- {}: syncs only its calendar, which a dry run or a mailbox does not \
-                     reach; skipped",
-                    account.name
-                ))
-            );
+            say.out(&format!(
+                "- {}: syncs only its calendar, which a dry run or a mailbox does not reach; \
+                 skipped",
+                account.name
+            ));
             return Synced::Skipped;
         }
         Err(error) => return Synced::Failed(error.message),
@@ -4473,7 +4470,9 @@ fn say_drain_line(say: &mut impl SyncOutput, payload: &serde_json::Value) {
 ///
 /// The daemon settles the pass `cancelled` before it answers, and the pass
 /// stops at its next boundary keeping what it ingested, which it announces
-/// to every client itself (PERSO-133); the line says that much. A pass that
+/// to every client itself (PERSO-133); the line says that much. A
+/// calendar-only account's pass is its calendar sync, which finishes in the
+/// daemon, and its line says that instead ([`cancelled_line`]). A pass that
 /// had already ended is printed as it ended, then, unless it ended cancelled,
 /// the line that says nothing was cancelled. A second `^C` while the cancel
 /// is out ends the client at once. The run stops after this account either
@@ -4495,10 +4494,7 @@ async fn cancel_pass(
         () = interrupts.next() => std::process::exit(EXIT_INTERRUPTED),
     };
     match answer {
-        Ok(_) => say.out(&format!(
-            "\u{26a0} {}",
-            mp_client::format::sync_cancelled_line(&account.name)
-        )),
+        Ok(_) => say.out(&format!("\u{26a0} {}", cancelled_line(account))),
         Err(error) if mp_client::operation::cancel_came_too_late(&error) => {
             // Its finish is in the stream already, or on its way.
             let settled =
@@ -4523,6 +4519,18 @@ async fn cancel_pass(
     Synced::Interrupted
 }
 
+/// What a cancelled pass of `account` ends with: what stays of a mail pass,
+/// or, for an account whose one server is its calendar's, that the calendar
+/// sync it waited for finishes in the daemon, since a calendar sync has no
+/// point to stop at (PERSO-318, PERSO-321).
+fn cancelled_line(account: &AccountConfig) -> String {
+    if account.syncs_only_a_calendar() {
+        mp_client::format::calendar_sync_cancelled_line(&account.name)
+    } else {
+        mp_client::format::sync_cancelled_line(&account.name)
+    }
+}
+
 /// The lines of `account`'s pass once it ended, and how it ended.
 fn say_settled_pass(
     say: &mut impl SyncOutput,
@@ -4534,10 +4542,7 @@ fn say_settled_pass(
         PassEnd::Done(result) => result,
         PassEnd::Failed(message) => return Synced::Failed(message),
         PassEnd::Cancelled => {
-            say.out(&format!(
-                "\u{26a0} {}",
-                mp_client::format::sync_cancelled_line(&account.name)
-            ));
+            say.out(&format!("\u{26a0} {}", cancelled_line(account)));
             return Synced::Cancelled;
         }
     };
@@ -4558,7 +4563,7 @@ fn say_settled_pass(
         serde_json::from_value::<mp_protocol::calendar::CalendarSynced>(result["calendar"].clone())
     {
         for line in mp_client::format::calendar_synced_cli_lines(&synced) {
-            println!("{}", paint(&line));
+            say.out(&line);
         }
         return Synced::Ran;
     }
@@ -8583,6 +8588,59 @@ mod tests {
                     interrupted: true
                 }
             );
+            assert_eq!(*asked.lock().unwrap(), ["sync.quick", "operation.cancel"]);
+        }
+
+        /// `^C` on the sync of an account whose one server is its calendar's
+        /// says the client stopped waiting and the calendar sync finishes in
+        /// the daemon, since a calendar sync has no point to stop at.
+        #[tokio::test]
+        async fn a_ctrl_c_on_a_calendar_only_sync_says_the_calendar_sync_finishes() {
+            let (path, asked) = daemon("calendar-only", |method, _| match method {
+                "sync.quick" => (Ok(json!({"operation_id": "op-1"})), Vec::new()),
+                "operation.cancel" => (
+                    Ok(json!({"operation_id": "op-1", "state": "cancelled"})),
+                    Vec::new(),
+                ),
+                other => panic!("unexpected {other}"),
+            });
+            let mut connection = mp_client::Connection::connect(&path)
+                .await
+                .expect("connect");
+            let mut record = Record::default();
+            let run = SyncRun {
+                limit: 50,
+                mailbox: None,
+                dry_run: false,
+            };
+            let calendar = AccountConfig {
+                name: "cal".to_string(),
+                calendar_backend: Some(mailypoppins::config::CalendarBackendKind::Ews),
+                ..Default::default()
+            };
+            assert!(calendar.syncs_only_a_calendar());
+            let mut interrupts = Script {
+                taken: VecDeque::new(),
+                fires: 1,
+            };
+            let end = sync_accounts(
+                &mut connection,
+                std::slice::from_ref(&calendar),
+                &run,
+                &mut interrupts,
+                &mut record,
+            )
+            .await;
+            assert_eq!(
+                record.0,
+                [(
+                    false,
+                    "\u{26a0} Stopped waiting for the calendar sync of cal: a calendar sync is not \
+                     cut short, so it finishes in the daemon"
+                        .to_string()
+                )]
+            );
+            assert!(end.interrupted);
             assert_eq!(*asked.lock().unwrap(), ["sync.quick", "operation.cancel"]);
         }
 

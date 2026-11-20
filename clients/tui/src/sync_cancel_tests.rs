@@ -212,6 +212,30 @@ fn sx_cancels_the_running_sync_and_drops_the_one_parked_behind_it() {
     assert_eq!(daemon.methods(), ["sync.full", "operation.cancel"]);
 }
 
+/// On an account whose one server is its calendar's (PERSO-318), `sS` runs
+/// its calendar sync, and the cancelled end says the client stopped waiting
+/// and the calendar sync finishes in the daemon, since it has no point to
+/// stop at.
+#[test]
+fn a_cancelled_calendar_only_sync_says_the_calendar_sync_finishes() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    app.account_config.calendar_backend = Some(mp_core::config::CalendarBackendKind::Ews);
+    app.accounts[0].account_config = app.account_config.clone();
+    assert!(app.account_config.syncs_only_a_calendar());
+
+    press(&mut app, &daemon, "sS");
+    press(&mut app, &daemon, "sx");
+    app.apply_event(&cancelled_finish(2));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some(
+            "Stopped waiting for the calendar sync of work: a calendar sync is not cut short, \
+             so it finishes in the daemon"
+        )
+    );
+}
+
 /// `sx` with nothing running says so and calls nothing, whatever another
 /// client may be syncing: this window names only what it started.
 #[test]
