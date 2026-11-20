@@ -2402,18 +2402,24 @@ fn organised_slice_with(setup: impl FnOnce(&WireServers)) -> Slice {
     Slice::start_wired(&[], support::calendar_fixture::seed_organised, setup)
 }
 
-/// The same, the SMTP server greeting every connection with [`UNAVAILABLE`],
-/// the `421` of RFC 5321 3.1: every submission fails before any recipient
-/// is asked, and is kept for a later pass.
-fn organised_slice_unavailable() -> Slice {
+/// The same, the SMTP server refusing every login with [`LOGIN_REFUSED`]:
+/// the whole submission fails before any recipient takes the message, so
+/// `send_durably` returns an error rather than a verdict per recipient, and
+/// the outbox keeps the row queued with no attempt spent (PERSO-296). That
+/// is the path `Reach::after`, `Reached::after` and `still_pending` read.
+///
+/// The refusal enters the account's login gate, so a later submission in
+/// the same row (the cancellation of a dropped attendee) fails at once
+/// without dialling, with the same error.
+fn organised_slice_login_refused() -> Slice {
     organised_slice_with(|wire| {
         wire.smtp
-            .answer(SmtpStep::Greeting, Some(SmtpAnswer::reply(UNAVAILABLE)))
+            .answer(SmtpStep::Auth, Some(SmtpAnswer::reply(LOGIN_REFUSED)))
     })
 }
 
-/// The greeting of an SMTP server that will not serve for now.
-const UNAVAILABLE: &str = "421 4.3.2 Service not available";
+/// The server's answer to a password it does not take.
+const LOGIN_REFUSED: &str = "535 5.7.8 authentication failed";
 
 /// The SMTP server answers `address`'s `RCPT` with `reply` for good: a `5xx`
 /// refuses the recipient, a `4xx` defers it.
@@ -2816,12 +2822,14 @@ async fn an_update_the_server_defers_still_cancels_the_attendee_it_drops() {
     assert_eq!(now["id"], own["id"], "the old version stands: {now}");
 }
 
-/// An update the transport fails before any attendee could take it stays
-/// queued for a later pass, so the cancellation of the attendee it drops
-/// is queued beside it rather than never sent.
+/// An update the transport fails before any attendee could take it (the
+/// server refuses the login) stays queued for a later pass, so the
+/// cancellation of the attendee it drops is queued beside it rather than
+/// never sent: both read their row after the error (`Reach::after`,
+/// `Reached::after`), never a verdict per recipient.
 #[tokio::test]
 async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
-    let slice = organised_slice_unavailable();
+    let slice = organised_slice_login_refused();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -2831,16 +2839,17 @@ async fn an_update_the_transport_fails_queues_the_cancellation_beside_it() {
                "fields": {"attendees": [{"email": "ada@example.com"}]}}),
     )
     .await;
-    assert_eq!(status["state"], "failed", "{status}");
-    let error = status["error"]["message"].as_str().unwrap_or_default();
+    let error = queued_whole(&status);
+    // The cancellation's error is the one its submission failed with, the
+    // refused login and the gate's hold, not a reply to a recipient.
     assert!(
-        error.contains("transient error (421): 4.3.2 Service not available")
-            && error.contains("waits in the outbox")
-            && error.contains(
-                "the cancellation to the attendees it drops waits in the outbox for \
-                 bob@example.com (transient error (421): 4.3.2 Service not available)"
-            )
-            && !error.contains("was not taken"),
+        error.contains(
+            "the cancellation to the attendees it drops waits in the outbox for \
+             bob@example.com (not sent, the message waits in the outbox: the server rejected the \
+             SMTP password"
+        ) && error.contains("(the server refused this password earlier")
+            && !error.contains("was not taken")
+            && !error.contains("is parked"),
         "{status}"
     );
 
@@ -2886,6 +2895,26 @@ async fn an_update_deferred_for_one_and_refused_for_another_says_which_waits() {
         ) && error.contains("told bob@example.com"),
         "{status}"
     );
+}
+
+/// The failure of a change whose whole submission failed before any
+/// recipient took it (the login refused, [`organised_slice_login_refused`]),
+/// which the outbox keeps queued: the reason is the submission's error,
+/// read through the change's row (`Reach::after`), and names no recipient,
+/// as a reply to each recipient (`Reach::of`) would. Answers the message.
+fn queued_whole(status: &Value) -> &str {
+    assert_eq!(status["state"], "failed", "{status}");
+    let error = status["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.starts_with(
+            "No attendee has the message yet: not sent, the message waits in the outbox: the \
+             server rejected the SMTP password; set it with mp config set-password -A perso \
+             smtp: SMTP login failed: permanent error (535): 5.7.8 authentication failed; it \
+             waits in the outbox and goes out on its own, so do not send the change again"
+        ) && !error.contains("the server did not take it for"),
+        "{status}"
+    );
+    error
 }
 
 /// The outbox rows of `IMIP` in `state`, as `send.outbox_list` lists them.
@@ -3064,14 +3093,15 @@ async fn a_change_is_taken_again_once_the_parked_update_went_out() {
     );
 }
 
-/// An update that only adds an attendee, queued with the SMTP server unavailable,
+/// An update that only adds an attendee, queued after the SMTP server refused
+/// the login,
 /// refuses a cancellation made before it goes out: built on the old
 /// version, it would name Ada and Bob alone at the queued update's
 /// sequence, which the organizer's agenda would then read as their
 /// uninvitation, and Carol would never be told.
 #[tokio::test]
 async fn a_cancel_waits_for_a_queued_update_that_adds_an_attendee() {
-    let slice = organised_slice_unavailable();
+    let slice = organised_slice_login_refused();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3082,7 +3112,7 @@ async fn a_cancel_waits_for_a_queued_update_that_adds_an_attendee() {
             {"email": "carol@example.com"}]}}),
     )
     .await;
-    assert_eq!(status["state"], "failed", "{status}");
+    queued_whole(&status);
     assert_eq!(outbox_rows(&mut conn, "pending_send").await.len(), 1);
     refused_while_queued(
         &mut conn,
@@ -3097,14 +3127,15 @@ async fn a_cancel_waits_for_a_queued_update_that_adds_an_attendee() {
     );
 }
 
-/// An update that drops an attendee, queued with the SMTP server unavailable,
+/// An update that drops an attendee, queued after the SMTP server refused the
+/// login,
 /// holds the uninvitation and the new version in the outbox; a
 /// cancellation made then would take the uninvitation's sequence, below
 /// the update's, and be lost on every attendee that update reaches, so it
 /// is refused.
 #[tokio::test]
 async fn a_cancel_waits_for_a_queued_update_and_its_uninvitation() {
-    let slice = organised_slice_unavailable();
+    let slice = organised_slice_login_refused();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let status = run_operation(
@@ -3114,7 +3145,14 @@ async fn a_cancel_waits_for_a_queued_update_and_its_uninvitation() {
                "fields": {"attendees": [{"email": "ada@example.com"}]}}),
     )
     .await;
-    assert_eq!(status["state"], "failed", "{status}");
+    let error = queued_whole(&status);
+    assert!(
+        error.contains(
+            "the cancellation to the attendees it drops waits in the outbox for \
+             bob@example.com (not sent, the message waits in the outbox:"
+        ),
+        "{status}"
+    );
     assert_eq!(outbox_rows(&mut conn, "pending_send").await.len(), 2);
     refused_while_queued(
         &mut conn,
@@ -3530,22 +3568,23 @@ async fn a_discarded_update_whose_copy_was_not_filed_is_the_version_a_later_chan
     );
 }
 
-/// An update nobody can hold, queued and never submitted with the
-/// SMTP server unavailable, is dropped whole by a discard: the agenda keeps the
-/// version before it.
+/// An update nobody can hold, refused at the SMTP login before any attendee
+/// could take it and so queued with no attempt spent, is dropped whole by a
+/// discard: the agenda keeps the version before it.
 #[tokio::test]
 async fn a_discarded_update_nobody_can_hold_leaves_the_version_before_it() {
-    let slice = organised_slice_unavailable();
+    let slice = organised_slice_login_refused();
     let mut conn = slice.connect().await;
     let own = imip_event(&mut conn, IMIP, support::calendar_fixture::OWN_UID).await;
     let held = held_sequences(slice.root(), support::calendar_fixture::OWN_UID, "REQUEST");
-    run_operation(
+    let status = run_operation(
         &mut conn,
         "event.update",
         json!({"account": IMIP, "event": own["id"],
                "fields": {"location": "Room 9"}}),
     )
     .await;
+    queued_whole(&status);
     let queued = outbox_rows(&mut conn, "pending_send").await;
     assert_eq!(queued.len(), 1, "{queued:?}");
     call(
