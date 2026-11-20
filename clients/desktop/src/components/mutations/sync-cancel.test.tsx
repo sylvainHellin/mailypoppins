@@ -7,7 +7,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderApp, shellReady } from "@/test/render";
 import { act } from "react";
-import { emitEnvelope, mock, settleSync } from "@/test/tauri-mock";
+import { emit, emitEnvelope, mock, settleSync } from "@/test/tauri-mock";
 
 const callsOf = (cmd: string) => mock.calls.filter((c) => c.cmd === cmd).map((c) => c.args);
 const activity = () => screen.getByRole("region", { name: "Activity" });
@@ -65,6 +65,30 @@ describe("cancelling a sync", () => {
     act(() => emitEnvelope("operation.finished", { operation_id: id, state: "cancelled", error: { code: -32008, message: `operation ${id} was cancelled` } }));
     expect(await within(activity()).findByText(CUT)).toBeInTheDocument();
     expect(screen.queryByText(CANCELLED)).toBeNull();
+  });
+
+  it("a sync that failed after the daemon announced its stop says the stop cut it short", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("sS");
+    await within(activity()).findByRole("group", { name: "Full sync of work…" });
+    const id = mock.syncs[0].operation_id;
+    act(() => emitEnvelope("daemon.shutting_down", { grace_secs: 0, pending: [] }));
+    act(() => emitEnvelope("operation.finished", { operation_id: id, state: "failed", error: { code: -32603, message: "the connection to the server closed" } }));
+    expect(await within(activity()).findByText(CUT)).toBeInTheDocument();
+    expect(screen.queryByText(/Sync of work failed/)).toBeNull();
+  });
+
+  it("a sync whose daemon stopped before its end arrived says the stop cut it short, not that it was dropped", async () => {
+    const { user } = renderApp();
+    await shellReady();
+    await user.keyboard("sS");
+    await within(activity()).findByRole("group", { name: "Full sync of work…" });
+    const id = mock.syncs[0].operation_id;
+    act(() => emitEnvelope("daemon.shutting_down", { grace_secs: 0, pending: [] }));
+    act(() => emit({ type: "operation_dropped", operation_id: id, kind: "sync", reason: "the daemon restarted" }));
+    expect(await within(activity()).findByText(CUT)).toBeInTheDocument();
+    expect(screen.queryByText(/was dropped/)).toBeNull();
   });
 
   it("a sync's own end takes its card away", async () => {

@@ -314,3 +314,64 @@ fn a_sync_the_daemons_stop_cancelled_says_the_stop_cut_it_short() {
         last_level(&app)
     );
 }
+
+/// The `daemon.shutting_down` the stopping daemon announces.
+fn shutting_down(revision: u64) -> EventEnvelope {
+    EventEnvelope {
+        instance_id: INSTANCE.to_string(),
+        revision,
+        kind: "daemon.shutting_down".to_string(),
+        payload: json!({"grace_secs": 0, "pending": []}),
+    }
+}
+
+/// The line a sync the daemon's stop cut short ends with.
+const CUT: &str = "Sync of work cut short by the daemon stopping: what it already ingested \
+                   stays, and the next sync goes on from there";
+
+/// A sync that ends `failed` after the daemon announced its stop was cut by
+/// that stop, and says so as `mp sync` and the desktop do, rather than that
+/// the sync failed.
+#[test]
+fn a_sync_that_failed_after_the_daemon_announced_its_stop_says_the_stop_cut_it_short() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    let health = format!("{:?}", app.accounts[0].sync_health);
+    press(&mut app, &daemon, "sS");
+    app.apply_event(&shutting_down(2));
+    app.apply_event(&EventEnvelope {
+        instance_id: INSTANCE.to_string(),
+        revision: 3,
+        kind: "operation.finished".to_string(),
+        payload: json!({
+            "operation_id": FULL,
+            "state": "failed",
+            "error": {"code": -32603, "message": "the connection to the server closed"},
+        }),
+    });
+    assert_eq!(app.status_message.as_deref(), Some(CUT));
+    assert_eq!(app.bg_count, 0);
+    assert_eq!(
+        format!("{:?}", app.accounts[0].sync_health),
+        health,
+        "a sync the stop cut short is not a failed one"
+    );
+}
+
+/// A sync whose end never arrived because the daemon stopped first is
+/// dropped when the next daemon's snapshot lands, with the cut-short line,
+/// rather than with nothing but a log line.
+#[test]
+fn a_sync_orphaned_by_the_daemons_stop_says_the_stop_cut_it_short() {
+    let daemon = Daemon::answering(CancelAnswer::Cancelled);
+    let mut app = app();
+    press(&mut app, &daemon, "sS");
+    app.apply_event(&shutting_down(2));
+    app.apply_bootstrap(&Bootstrap {
+        instance_id: "the-next-daemon".to_string(),
+        revision: 1,
+        ..Bootstrap::default()
+    });
+    assert_eq!(app.status_message.as_deref(), Some(CUT));
+    assert_eq!(app.bg_count, 0, "the spinner comes down");
+}
