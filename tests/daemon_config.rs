@@ -288,6 +288,9 @@
 #[path = "support/readiness.rs"]
 mod readiness;
 
+#[path = "support/closed_port.rs"]
+mod closed_port;
+
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -2532,19 +2535,15 @@ async fn config_set_password_without_a_kind_stores_one_password_as_both() {
 async fn config_probe_answers_a_refused_session_and_never_echoes_the_password() {
     let sandbox = Sandbox::with_accounts(&["alpha"]);
     let before = sandbox.read_config();
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("a localhost port")
-        .local_addr()
-        .expect("its address")
-        .port();
+    let closed = closed_port::ClosedPort::bind();
     let _daemon = sandbox.start_daemon().await;
     let (mut conn, _hello) = connect_initialized(&sandbox).await;
 
     let mut candidate = account_params("probe");
     candidate["smtp"]["host"] = json!("127.0.0.1");
-    candidate["smtp"]["port"] = json!(closed);
+    candidate["smtp"]["port"] = json!(closed.port());
     candidate["imap"]["host"] = json!("127.0.0.1");
-    candidate["imap"]["port"] = json!(closed);
+    candidate["imap"]["port"] = json!(closed.port());
     for check in ["smtp", "imap", "mailboxes"] {
         let answer = call_ok(
             &mut conn,

@@ -2711,14 +2711,13 @@ fn mp_config_add_account_refuses_without_a_configuration() {
 #[test]
 fn mp_config_add_account_tests_the_login_through_the_daemon_and_writes_nothing_when_it_fails() {
     let slice = Slice::start();
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("a localhost port")
-        .local_addr()
-        .expect("its address")
-        .port();
+    let closed = support::closed_port::ClosedPort::bind();
     let before = std::fs::read_to_string(slice.root().join("config.toml")).expect("config.toml");
     let secret = "never-stored-wizard-secret";
-    let input = format!("1\nprobe\n127.0.0.1\n{closed}\nme@example.com\n\n{secret}\nn\n");
+    let input = format!(
+        "1\nprobe\n127.0.0.1\n{}\nme@example.com\n\n{secret}\nn\n",
+        closed.port()
+    );
 
     let out = slice.routed_with_stdin(&["config", "add-account"], &input);
 

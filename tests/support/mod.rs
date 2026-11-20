@@ -44,11 +44,16 @@
 //! [`gate`] holds hooked futures (a tick body, a drain) until a test opens
 //! it for a counted number of passes (PERSO-222); the runtime suite and the
 //! library's unit tests include it by path.
+//! [`closed_port`] holds a localhost port nothing listens on, which refuses
+//! every connect and which no other bind takes while the guard lives
+//! (PERSO-342); the config suite and the library's unit tests include it by
+//! path.
 
 #![allow(dead_code)]
 
 pub mod admin_fixture;
 pub mod calendar_fixture;
+pub mod closed_port;
 pub mod draft_fixture;
 pub mod events;
 pub mod fake_imap;

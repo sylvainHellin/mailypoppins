@@ -425,13 +425,11 @@ async fn assert_nothing_sent(config: &SmtpConfig, reason_starts: &str) {
 
 #[tokio::test]
 async fn a_refused_connect_says_nothing_was_sent() {
-    // A port nothing listens on, held bound for the whole test without a
-    // listen, which the kernel refuses. A port bound and let go is free for
-    // the next bind of port 0, the fake of a test running beside this one
-    // among them, which then took this test's message (PERSO-342).
-    let unlistened = tokio::net::TcpSocket::new_v4().unwrap();
-    unlistened.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let port = unlistened.local_addr().unwrap().port();
+    // Held for the whole test: a port bound and let go is free for the next
+    // bind of port 0, the fake of a test running beside this one among them,
+    // which then took this test's message (PERSO-342).
+    let closed = crate::closed_port::ClosedPort::bind();
+    let port = closed.port();
     assert_nothing_sent(
         &config(port),
         &format!("could not connect to 127.0.0.1:{port}: connection refused"),

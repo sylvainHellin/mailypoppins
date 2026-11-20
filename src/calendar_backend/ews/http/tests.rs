@@ -452,9 +452,8 @@ async fn a_silent_or_absent_server_is_a_transport_failure() {
     assert!(err.to_string().contains("did not answer within"), "{err}");
     assert!(started.elapsed() < Duration::from_secs(3));
 
-    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/EWS/Exchange.asmx", unused.local_addr().unwrap());
-    drop(unused);
+    let closed = crate::closed_port::ClosedPort::bind();
+    let url = format!("http://{}/EWS/Exchange.asmx", closed.addr());
     let http = EwsHttp::plain_for_test(
         &url,
         &fresh_user("absent"),

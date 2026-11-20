@@ -62,3 +62,26 @@ mod tui_tests;
 #[cfg(test)]
 #[path = "../tests/support/gate.rs"]
 pub(crate) mod gate;
+
+/// A localhost port that refuses every connect while its guard lives, the
+/// one `tests/support/closed_port.rs` gives the integration tests (PERSO-342).
+#[cfg(test)]
+#[path = "../tests/support/closed_port.rs"]
+pub(crate) mod closed_port;
+
+#[cfg(test)]
+mod closed_port_tests {
+    use crate::closed_port::ClosedPort;
+    use std::io::ErrorKind;
+
+    /// The port refuses a connect, and no listener can take it while the
+    /// guard lives, not even one bound with `SO_REUSEADDR` as `std`'s is.
+    #[test]
+    fn a_closed_port_refuses_and_is_never_handed_out() {
+        let closed = ClosedPort::bind();
+        let refused = std::net::TcpStream::connect(closed.addr()).expect_err("refused");
+        assert_eq!(refused.kind(), ErrorKind::ConnectionRefused);
+        let taken = std::net::TcpListener::bind(closed.addr()).expect_err("in use");
+        assert_eq!(taken.kind(), ErrorKind::AddrInUse);
+    }
+}
