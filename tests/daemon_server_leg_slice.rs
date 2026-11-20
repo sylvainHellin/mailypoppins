@@ -1118,6 +1118,38 @@ mod wire {
         assert_eq!(result["unreachable"], json!([]));
     }
 
+    /// A server search hit names the copy it was found in: a self-sent
+    /// message the store holds in the inbox and in sent, searched in Sent by
+    /// any of the mailbox's names, comes back with the sent copy's selector
+    /// and row, though the sidebar reports the hit under its label "Sent"
+    /// and the store keys the row `sent`.
+    #[test]
+    fn a_server_search_hit_names_the_copy_in_the_mailbox_it_was_found_in() {
+        use super::support::wire_fixture::SENT;
+
+        let mut wire = WireRoot::new();
+        let raw = mail("self", "wire@example.com", "Self-sent ledger", "to myself");
+        wire.imap.set_mail(INBOX, 11, vec![(1, raw.clone())]);
+        wire.imap.set_mail(SENT, 12, vec![(4, raw)]);
+        wire.start(&[]);
+        wire.sync();
+        assert_eq!(wire.local("sent").len(), 1, "the store holds the sent copy");
+
+        for mailbox in ["sent", "Sent"] {
+            let out = wire.mp(&["search", "--mailbox", mailbox, "--json", "subject:ledger"]);
+            assert!(out.status.success(), "{out:?}");
+            let answer: serde_json::Value =
+                serde_json::from_slice(&out.stdout).expect("search --json");
+            let hits = answer["messages"].as_array().expect("messages");
+            assert_eq!(hits.len(), 1, "{answer}");
+            assert_eq!(hits[0]["mailbox"], "sent", "{answer}");
+            assert_eq!(
+                hits[0]["selector"], "mp://wire/sent/self@example.org",
+                "--mailbox {mailbox}: {answer}"
+            );
+        }
+    }
+
     /// `message.fetch`, the overlay's `f`: the server-only hit comes into the
     /// store under the server's UID and becomes a row with a selector, and a
     /// second fetch answers with that row, already present, and opens no
