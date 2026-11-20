@@ -749,9 +749,25 @@ mod given_up_tests {
             given_up_sentence(&message(GivenUpKind::Refused, Some(&earlier)), now)
                 .ends_with("; mp asks again on the next sync")
         );
-        let graph = given_up_sentence(&message(GivenUpKind::Unwritable, None), now);
-        assert!(graph.contains(": mp could not store it ("), "{graph}");
-        assert!(graph.ends_with("; mp asks again on every sync"), "{graph}");
+        // A Graph message (PERSO-334 review): no UID worth showing, and only
+        // a full sync asks for it again, since a pass on a delta token walks
+        // the changed messages only.
+        let graph_message = GivenUpMessage {
+            uid: 1 << 62,
+            ..message(GivenUpKind::Unwritable, None)
+        };
+        let graph = given_up_sentence(&graph_message, now);
+        assert_eq!(
+            graph,
+            "inbox: mp could not store a message (the server answered NO: [UNAVAILABLE] try \
+             later); mp asks again on a full sync from the TUI or the desktop app"
+        );
+        assert_eq!(
+            given_up_brief(&graph_message, now),
+            "inbox, still on the server: mp could not store a message: the server answered NO: \
+             [UNAVAILABLE] try later. mp asks again on a full sync from the TUI or the desktop \
+             app."
+        );
         assert_eq!(
             given_up_headline(2),
             "2 messages could not be downloaded; they are still on the server, nothing is lost"
