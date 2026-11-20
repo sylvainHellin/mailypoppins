@@ -3859,3 +3859,12 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 - A test of the error path (`Reach::after`, `Reached::after`, `still_pending` in `src/daemon/methods/calendar.rs`) refuses AUTH, and asserts a wording only that path gives, since "waits in the outbox" appears in both renderings.
 - The refusal enters the login gate, so a second submission in the same operation fails without dialling, with the gate's "(the server refused this password earlier ...)" appended.
 - A migrated test that still passes may no longer run the branch it was written for: after moving a row to another fake, break the branch on purpose and see the row fail.
+
+## Showing the messages given up on made stale failure rows visible (2026-11-20, PERSO-334)
+
+- The daemon's runtime tick calls `run_sync` directly and only `mp sync --mailbox` and first syncs go through `run_sync_guarded`, so anything every pass must report belongs in `run_sync` itself.
+- `#[ts(optional)]` refuses a `Vec`; an array that is absent when empty is `#[serde(default, skip_serializing_if = "Vec::is_empty")]` plus `#[ts(as = "Option<Vec<T>>", optional)]`, and only `cargo test -p mp-protocol --features ts` builds it: workspace clippy and tests never enable the feature.
+- A row keyed by a server UID that only a success deletes outlives the message once the server stops listing it; anything a client is shown from such a table needs a cleanup on a whole, trusted listing (the prune's gate), and the catalogue refresh may drop only the rows of folders out of policy, never those of a folder the last LIST merely left out, which is missing and comes back with its cursor.
+- `Catalogue::find` falls back to missing folders, so a hook on a folder the server left out of one LIST keeps scanning it; anything the scan reads for that folder must survive the missing period.
+- A Graph store UID is a 63-bit hash that `JSON.parse` rounds above 2^53: never put it on the wire for a client to show or key on.
+- A Graph message given up on is only downloaded again on a full sync: once it stops owing a write the delta token is minted, and quick passes walk only changed messages.
