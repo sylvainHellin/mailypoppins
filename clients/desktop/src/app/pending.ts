@@ -858,6 +858,14 @@ export function dismissHold(s: AppState, operationId: string): AppState {
 // Syncs
 // ---------------------------------------------------------------------------
 
+/**
+ * What a cancelled sync ends with (PERSO-321), the words mp-client's
+ * `format::sync_cancelled_line` gives the TUI and the CLI.
+ */
+export function syncCancelledText(account: string): string {
+  return `Sync of ${account} cancelled: what it already ingested stays, and the next sync goes on from there`;
+}
+
 function syncEnded(s: AppState, end: OperationEnd): AppState {
   const run = s.syncs[end.operation_id];
   if (!run) return s;
@@ -867,7 +875,11 @@ function syncEnded(s: AppState, end: OperationEnd): AppState {
   if ("dropped" in end) {
     return pushNotice(next, { kind: "sync_failed", account: run.account, text: `Sync of ${run.account} was dropped: ${end.dropped}` });
   }
-  if (end.state === "failed" || end.state === "cancelled") {
+  // A cancel is no failure of the sync: it ends on what stays (PERSO-321).
+  if (end.state === "cancelled") {
+    return pushNotice(next, { kind: "operation_cancelled", account: run.account, text: syncCancelledText(run.account) });
+  }
+  if (end.state === "failed") {
     const why = end.error ?? end.state;
     // The tick's own `sync.completed` already logged this failure.
     return pushNotice(next, { kind: "sync_failed", account: run.account, text: `Sync of ${run.account} failed: ${why}` }, !run.tickLogged);

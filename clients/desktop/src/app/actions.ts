@@ -14,6 +14,7 @@ import { editEvent, removeEvent } from "@/app/eventChange";
 import { newInvitation } from "@/app/invite";
 import { nextOrder } from "@/app/search";
 import { manageSignatures } from "@/app/signatures";
+import { cancelSyncs } from "@/app/syncCancel";
 import { openBlockSender } from "@/app/senders";
 import { copyNotesExport, handOffNotes, openNotePrompt } from "@/app/noteActions";
 import { composeToContact, copyContactAddress, rebuildContacts, sendVcard, CONTACTS_SEARCH_ID } from "@/app/contacts";
@@ -491,6 +492,8 @@ export function runAction(id: ActionId, s: AppState, dispatch: Dispatch<Action>,
       void createMutations(dispatch).sync(account, mode);
       return;
     }
+    case "cancel_sync":
+      return cancelSyncs(s, dispatch);
   }
 }
 

@@ -19,12 +19,13 @@ export type ViewKeyTable = {
 
 /**
  * The prefix continuations that run in every view, Mail included: the
- * syncs, the activity log, config.toml and the daemon log in the editor, and
+ * syncs and their cancel, the activity log, config.toml and the daemon log in the editor, and
  * the view switch (the TUI's `is_view_agnostic`).
  */
 export const VIEW_AGNOSTIC_COMBOS: Readonly<Record<string, ActionId>> = {
   ss: "quick_sync",
   sS: "full_sync",
+  sx: "cancel_sync",
   sl: "activity_log",
   sc: "open_config",
   sf: "open_log",

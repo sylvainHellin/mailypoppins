@@ -91,6 +91,10 @@
         "action": "Full sync"
       },
       {
+        "key": "sx",
+        "action": "Cancel the running sync"
+      },
+      {
         "key": "sl",
         "action": "Activity log overlay"
       },

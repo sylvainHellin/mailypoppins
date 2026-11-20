@@ -39,6 +39,7 @@ mpFixture.emitEnvelope("state.invalidate", { resource: "mailbox:work/inbox", sco
 mpFixture.emit({ type: "connection", status: { state: "failed", error: { kind: "version_mismatch", why: "...", socket: "", log: "", daemon_version: "0.9.0", daemon_protocol: { min: 1, max: 1 } } } })
 mpFixture.emitMenu("settings")                   // a native menu item, by its id in src-tauri/src/menu.rs
 mpFixture.settleRebuild()                        // the oldest contact rebuild; { saved: "refused_shrunk" } or { fail: "..." }
+mpFixture.settleSync()                           // the oldest sync, succeeded; { silent: true } ends it with no finish, so a Cancel comes too late
 mpFixture.settleRsvp()                           // the oldest event_respond answer; { fail: true } or { delivered: false }
 mpFixture.settleInvite()                         // the oldest invitation sent
 mpFixture.settleEventCreate()                    // the oldest event_create; { fail: true }

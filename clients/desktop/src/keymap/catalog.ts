@@ -68,6 +68,8 @@ export type ActionId =
   | "dismiss_all_notices"
   | "quick_sync"
   | "full_sync"
+  /** `sx`: cancel the syncs this window started (PERSO-321). */
+  | "cancel_sync"
   | "new_draft"
   | "manage_signatures"
   | "reply"
@@ -203,6 +205,7 @@ export const BY_ACTION: Record<string, Binding> = {
   "Go to mailbox (fuzzy picker)": { id: "go_to_mailbox" },
   "Quick sync": { id: "quick_sync" },
   "Full sync": { id: "full_sync" },
+  "Cancel the running sync": { id: "cancel_sync" },
   "Activity log overlay": { id: "activity_log" },
   "Open config.toml in $EDITOR": { id: "open_config" },
   "Open log file in $EDITOR": { id: "open_log" },

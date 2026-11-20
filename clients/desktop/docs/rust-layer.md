@@ -352,7 +352,7 @@ A send's `state` is `succeeded` once the submission ran, with each recipient's v
 
 ### Cancelling
 
-`operation_cancel {operation_id}` is `operation.cancel` for any operation the layer awaits: the activity area's Cancel of a contact rebuild, an RSVP and an invitation send, and the device-code dialog's Cancel of a sign-in ([shell.md](shell.md), "Actions, dialogs and the activity area").
+`operation_cancel {operation_id}` is `operation.cancel` for any operation the layer awaits: the activity area's Cancel of a contact rebuild, an RSVP, an invitation send and a sync (`sx` too, PERSO-321), and the device-code dialog's Cancel of a sign-in ([shell.md](shell.md), "Actions, dialogs and the activity area").
 The operation stays awaited, so its `operation.finished` with `state: "cancelled"` reaches the webview and ends it like any other end.
 An id the daemon refuses with `-32602`, one that already ended or that it forgot, answers `already_settled`: its own end has come or will come, and says how it went.
 `search_server_cancel` is the same call followed by `forget_operation`, since the search view ends the search itself on the answer; a held send is cancelled with `send_cancel_hold`, not with this.

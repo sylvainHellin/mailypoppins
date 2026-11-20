@@ -77,7 +77,8 @@ describe("the palette's ranking", () => {
     const cardEdit = "EVENT CARD Edit this event (the event form with its values)";
     const cardRemove = "EVENT CARD Cancel this meeting (tells the attendees) or delete this event";
     expect(labels("edit").slice(0, 2)).toEqual(["Edit recipients (in Drafts or a conversation)", edit]);
-    expect(labels("cancel")[0]).toBe(remove);
+    // The sync family's "Cancel the running sync" (PERSO-321) comes first, by its place in the keymap.
+    expect(labels("cancel").slice(0, 2)).toEqual(["Cancel the running sync", remove]);
     expect(labels("delete").slice(0, 2)).toEqual(["Delete", remove]);
     // The card's `e` row matches "edit" inside $EDITOR and "event" by its section, below both edits.
     expect(rows("edit event")).toEqual([

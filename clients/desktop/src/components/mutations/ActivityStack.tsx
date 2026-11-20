@@ -6,7 +6,7 @@
 // A hold card's end line is a status region of the card, mounted empty with
 // the card, for the same reason. Between the holds and the notices, the app
 // update's card while it is available, downloads, asks for the restart or
-// failed, then one card per contact rebuild, RSVP and invitation this window awaits, with Cancel.
+// failed, then one card per contact rebuild, RSVP, invitation and sync this window awaits, with Cancel.
 
 import { useCallback, useState, type Dispatch } from "react";
 import { CircleAlert, CircleArrowUp, CircleCheck, ExternalLink, LoaderCircle, RotateCw, Send, Undo2, X } from "lucide-react";
@@ -16,6 +16,7 @@ import { useAppState, useDispatch } from "@/app/store";
 import { FAILURES, LIFETIME_MS, noticeLifetime } from "@/app/activity";
 import { useWindDown } from "@/hooks/use-wind-down";
 import { RESPONSE_LABEL } from "@/app/rsvp";
+import { cancelSync } from "@/app/syncCancel";
 import { installUpdate, openReleasePage, restartIntoUpdate, updateCardShown } from "@/app/updates";
 import type { Action } from "@/app/reducer";
 import * as cmd from "@/lib/commands";
@@ -176,13 +177,19 @@ export function HoldToast({ hold, awaiting = false, onCancel, onGone }: HoldToas
   );
 }
 
-/** An operation this window awaits that a card offers to cancel. */
-export type RunningOperation = { operation_id: string; kind: "contact_rebuild" | "rsvp" | "send_invite"; text: string; cancelLabel: string };
+/** An operation this window awaits that a card offers to cancel; `account` is a sync's, which its too-late cancel names. */
+export type RunningOperation = {
+  operation_id: string;
+  kind: "contact_rebuild" | "rsvp" | "send_invite" | "sync";
+  text: string;
+  cancelLabel: string;
+  account?: string;
+};
 
 /**
- * The contact rebuilds, RSVPs and invitations this window awaits, in that
- * order, once their start answered with an id: before that there is nothing
- * to name in a cancel.
+ * The contact rebuilds, RSVPs, invitations and syncs this window awaits, in
+ * that order, once their start answered with an id: before that there is
+ * nothing to name in a cancel.
  */
 export function runningOperations(s: AppState): RunningOperation[] {
   const out: RunningOperation[] = [];
@@ -197,6 +204,11 @@ export function runningOperations(s: AppState): RunningOperation[] {
   for (const r of s.inviteSends) {
     if (!r.operation_id) continue;
     out.push({ operation_id: r.operation_id, kind: "send_invite", text: `Sending the invitation ${r.subject}…`, cancelLabel: "Cancel the invitation" });
+  }
+  // PERSO-321: a sync is in `syncs` once `sync_trigger` answered its id.
+  for (const [operation_id, run] of Object.entries(s.syncs)) {
+    const what = run.mode === "full" ? "Full sync" : "Quick sync";
+    out.push({ operation_id, kind: "sync", text: `${what} of ${run.account}…`, cancelLabel: "Cancel the sync", account: run.account });
   }
   return out;
 }
@@ -241,7 +253,9 @@ export function OperationToast({ op }: { op: RunningOperation }) {
         disabled={cancelling}
         onClick={() => {
           setCancelling(true);
-          void cancelOperation(dispatch, op.operation_id).then((ok) => {
+          const cancel =
+            op.kind === "sync" ? cancelSync(dispatch, op.operation_id, op.account ?? "") : cancelOperation(dispatch, op.operation_id);
+          void cancel.then((ok) => {
             if (!ok) setCancelling(false);
           });
         }}
