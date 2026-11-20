@@ -268,8 +268,8 @@ describe("the notes list and the hand-off", () => {
     });
     await user.keyboard("x");
     await screen.findByRole("complementary", { name: "Agent" });
-    await waitFor(() => expect(terms.at(-1)?.options).toMatchObject({ fontSize: 16 }));
-    expect(terms.at(-1)?.options.fontFamily).toMatch(/^"JetBrainsMono Nerd Font Mono", .+, "Symbols Nerd Font Mono"$/);
+    await waitFor(() => expect(terms[terms.length - 1]?.options).toMatchObject({ fontSize: 16 }));
+    expect(terms[terms.length - 1]?.options.fontFamily).toMatch(/^"JetBrainsMono Nerd Font Mono", .+, "Symbols Nerd Font Mono"$/);
   });
 
   it("an agent that does not start leaves the notes open and says why", async () => {

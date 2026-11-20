@@ -398,7 +398,7 @@ describe("the terminal pane", () => {
     expect(fonts.load.mock.calls[1][0]).toBe('16px "Symbols Nerd Font Mono"');
     fonts.resolve();
     await waitFor(() => expect(term.atlasCleared).toBe(2));
-    expect(term.redraws.at(-1)).toEqual({ start: 0, end: 25 });
+    expect(term.redraws[term.redraws.length - 1]).toEqual({ start: 0, end: 25 });
     // Clearing the setting goes back to the app's font, and the same props change nothing.
     xt.state.size = { cols: 100, rows: 30 };
     m.rerender({ font: { family: null, size: null } });

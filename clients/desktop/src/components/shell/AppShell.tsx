@@ -39,6 +39,7 @@ import { useBoot, useDataSync, useVersionInfo } from "@/app/data";
 import { useLayout } from "@/app/layout";
 import { useStoredTheme } from "@/app/theme";
 import { hiddenPaletteRows, useStoredReaderMode } from "@/app/readerMode";
+import { useStoredTerminalFont } from "@/app/terminalFont";
 import { updatePaletteEntries, useUpdateEvents } from "@/app/updates";
 import { screenFor } from "@/app/state";
 import { useAppState, useDispatch } from "@/app/store";
@@ -66,6 +67,7 @@ export function AppShell() {
   useVersionInfo(s, dispatch);
   useStoredTheme(dispatch);
   useStoredReaderMode(dispatch);
+  useStoredTerminalFont(dispatch);
   useDataSync(s, dispatch);
   useKeymap(s, dispatch);
   useCloseGuard(s, dispatch);

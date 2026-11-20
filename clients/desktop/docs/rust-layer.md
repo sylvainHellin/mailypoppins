@@ -14,7 +14,7 @@ The frontend calls the commands below with `invoke` and listens on one ordered e
 | `commands.rs` | The Tauri commands and their result types |
 | `editor.rs` | The external editor a draft opens in, and the editor setting |
 | `terminal.rs` | The embedded terminal editor: one PTY session per draft, its reader and pump threads, and the session table |
-| `settings.rs` | `desktop.json`, the desktop's own settings: the editor template, the theme, the reader mode and the editor's colours |
+| `settings.rs` | `desktop.json`, the desktop's own settings: the editor template, the theme, the reader mode, the editor's colours and the terminal font |
 | `attachments.rs` | Attachments, a draft's `attachments:` list, and the browser rendition |
 | `calendar.rs` | The calendar view, the calendars and their visibility, one event, an invitation's `invite.ics` in the editor, a message's invitation, the answer, the Graph probe and a new invitation |
 | `contacts.rs` | The ranked contacts with their recipient, the index rebuild, and a contact's vCard draft |
@@ -663,7 +663,7 @@ None of them reaches the daemon.
 The file is one JSON object, and each setting is a string under its key:
 
 ```ts
-type SettingKey = "editor" | "theme" | "reader_mode" | "editor_colors";
+type SettingKey = "editor" | "theme" | "reader_mode" | "editor_colors" | "terminal_font_family" | "terminal_font_size";
 ```
 
 - `editor` is the editor command template (see Drafts and the editor), refused with `setup` when it does not split.
@@ -671,6 +671,10 @@ type SettingKey = "editor" | "theme" | "reader_mode" | "editor_colors";
 - `reader_mode` is `html` or `text`, refused with `setup` otherwise; unset means html ([reader.md](reader.md), "Text mode").
 - `editor_colors` is `app` (Neovim and Vim take the `mailypoppins` colorscheme in the app's palette) or `editor` (their own), refused with `setup` otherwise; unset means app (see Terminal sessions, "The look").
   `terminal_spawn` reads it at each spawn, and a file that does not read counts as `app`, logged.
+- `terminal_font_family` is one font family the embedded terminal draws in before the app's mono stack, such as `JetBrainsMono Nerd Font Mono`; unset means the app's stack alone ([shell.md](shell.md), "The terminal pane").
+  `family_is_safe` takes up to 100 characters, each a letter or digit of any script, a space, `-`, `_`, `.` or `+`, and refuses anything else with `setup`, so the webview's double quotes around the name always close and no second family enters the stack.
+- `terminal_font_size` is the embedded terminal's size in CSS pixels, from 8 to 32 with one decimal at most and no leading zero (`16`, `13.5`), refused with `setup` otherwise; unset means the app's `text-sm`.
+  Only the webview reads the two terminal font keys; `src/lib/terminal-font.ts` applies the same rules before it writes and reads a stored value that breaks them as unset.
 
 `setting_get` and `setting_set` read and write one key, and `editor_setting_get` and `editor_setting_set` are the `editor` key with what it resolves to.
 A key outside `SettingKey` is `not_found` naming the known keys, and nothing is written.

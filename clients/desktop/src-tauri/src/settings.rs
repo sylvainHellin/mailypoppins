@@ -2,8 +2,9 @@
 //! (#0136).
 //!
 //! The file is a JSON object of string values, one per [`SettingKey`]: the
-//! editor template ([`crate::editor`]), the theme, the reader's mode, and
-//! whose colours the embedded editor shows ([`crate::terminal`]).
+//! editor template ([`crate::editor`]), the theme, the reader's mode, whose
+//! colours the embedded editor shows ([`crate::terminal`]), and the embedded
+//! terminal's font family and size, which only the webview reads.
 //! `setting_get` and `setting_set` read and write one key and keep every
 //! other key of the file, unknown ones included; a key outside
 //! [`SettingKey`] is refused with `not_found`. A missing file, a missing key
@@ -33,6 +34,12 @@ pub const READER_MODES: &[&str] = &["html", "text"];
 /// The values the `editor_colors` key takes.
 pub const EDITOR_COLORS: &[&str] = &["app", "editor"];
 
+/// The longest `terminal_font_family` taken, in characters.
+pub const TERMINAL_FONT_FAMILY_MAX: usize = 100;
+
+/// The smallest and largest `terminal_font_size` taken, in CSS pixels.
+pub const TERMINAL_FONT_SIZE_RANGE: (f64, f64) = (8.0, 32.0);
+
 /// A key of `desktop.json`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -49,14 +56,22 @@ pub enum SettingKey {
     /// `app` (Neovim and Vim take the app's colorscheme, `mailypoppins`) or
     /// `editor` (the editor's own); unset is `app`.
     EditorColors,
+    /// One font family the embedded terminal draws in before the app's mono
+    /// stack (see [`family_is_safe`]); unset is the app's stack alone.
+    TerminalFontFamily,
+    /// The embedded terminal's font size in CSS pixels (see
+    /// [`size_is_valid`]); unset is the app's `text-sm`.
+    TerminalFontSize,
 }
 
 impl SettingKey {
-    pub const ALL: [SettingKey; 4] = [
+    pub const ALL: [SettingKey; 6] = [
         SettingKey::Editor,
         SettingKey::Theme,
         SettingKey::ReaderMode,
         SettingKey::EditorColors,
+        SettingKey::TerminalFontFamily,
+        SettingKey::TerminalFontSize,
     ];
 
     /// The key as the file spells it.
@@ -66,6 +81,8 @@ impl SettingKey {
             SettingKey::Theme => "theme",
             SettingKey::ReaderMode => "reader_mode",
             SettingKey::EditorColors => "editor_colors",
+            SettingKey::TerminalFontFamily => "terminal_font_family",
+            SettingKey::TerminalFontSize => "terminal_font_size",
         }
     }
 
@@ -98,9 +115,55 @@ impl SettingKey {
             SettingKey::EditorColors if !EDITOR_COLORS.contains(&value) => Err(GuiError::Setup {
                 message: format!("the editor colours `{value}` are neither app nor editor"),
             }),
-            SettingKey::Theme | SettingKey::ReaderMode | SettingKey::EditorColors => Ok(()),
+            SettingKey::TerminalFontFamily if !family_is_safe(value) => Err(GuiError::Setup {
+                message: format!(
+                    "the terminal font `{value}` is not one family name of up to {TERMINAL_FONT_FAMILY_MAX} letters, digits, spaces, hyphens, underscores, periods and plus signs"
+                ),
+            }),
+            SettingKey::TerminalFontSize if !size_is_valid(value) => Err(GuiError::Setup {
+                message: format!(
+                    "the terminal font size `{value}` is not a number of pixels from 8 to 32, with one decimal at most"
+                ),
+            }),
+            SettingKey::Theme
+            | SettingKey::ReaderMode
+            | SettingKey::EditorColors
+            | SettingKey::TerminalFontFamily
+            | SettingKey::TerminalFontSize => Ok(()),
         }
     }
+}
+
+/// Whether `family` is one font family name the webview can put in double
+/// quotes at the head of a CSS font stack: letters and digits of any script,
+/// spaces, `-`, `_`, `.` and `+`, at most [`TERMINAL_FONT_FAMILY_MAX`]
+/// characters. No quote, backslash, comma, semicolon, bracket or control
+/// character gets through, so it can neither close its quotes nor add a
+/// family to the list. `src/app/terminalFont.ts` applies the same rule.
+pub fn family_is_safe(family: &str) -> bool {
+    let length = family.chars().count();
+    (1..=TERMINAL_FONT_FAMILY_MAX).contains(&length)
+        && family
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '+'))
+}
+
+/// Whether `size` is a pixel size the terminal takes: a whole number without
+/// a leading zero and at most one decimal, from 8 to 32
+/// ([`TERMINAL_FONT_SIZE_RANGE`]). `src/app/terminalFont.ts` applies the same
+/// rule.
+pub fn size_is_valid(size: &str) -> bool {
+    let (whole, fraction) = match size.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (size, None),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let shaped = digits(whole)
+        && whole.len() <= 2
+        && !whole.starts_with('0')
+        && fraction.is_none_or(|f| f.len() == 1 && digits(f));
+    let (min, max) = TERMINAL_FONT_SIZE_RANGE;
+    shaped && size.parse::<f64>().is_ok_and(|n| (min..=max).contains(&n))
 }
 
 /// Whose colours the embedded editor shows: the `editor_colors` key.

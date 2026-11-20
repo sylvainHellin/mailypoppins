@@ -58,6 +58,7 @@ import { keyOf, NoteBook, noteRefusal, type NoteTarget, type NoteWorld } from "@
 import { kindOfRole } from "@/components/sidebar/icons";
 import { describeRecurrence, filled } from "@/app/recurrence";
 import { countsAsFailed } from "@/app/outbox";
+import { familyRefusal, sizeRefusal } from "@/lib/terminal-font";
 import { comparableAddress, entryRefusal, mailboxAddresses, ownAddresses, ownMail, senderAddress } from "@/lib/mailbox";
 import type {
   AccountDraft,
@@ -3117,7 +3118,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
   }
 }
 
-const SETTING_KEYS = ["editor", "theme", "reader_mode", "editor_colors"];
+const SETTING_KEYS = ["editor", "theme", "reader_mode", "editor_colors", "terminal_font_family", "terminal_font_size"];
 
 function settingKey(key: unknown): string {
   const k = String(key);
@@ -3138,6 +3139,9 @@ function storeSetting(key: string, value: string | null): void {
   if (key === "editor_colors" && v !== "" && !["app", "editor"].includes(v)) {
     throw { kind: "setup", message: `the editor colours \`${v}\` are neither app nor editor` };
   }
+  // settings.rs `family_is_safe` and `size_is_valid`, as terminalFont.ts states them.
+  const terminalRefusal = key === "terminal_font_family" ? familyRefusal(v) : key === "terminal_font_size" ? sizeRefusal(v) : null;
+  if (terminalRefusal) throw { kind: "setup", message: terminalRefusal };
   if (v === "") mock.settings.delete(key);
   else mock.settings.set(key, v);
 }

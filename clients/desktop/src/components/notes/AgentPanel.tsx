@@ -14,6 +14,7 @@ import { Bot, PanelRightClose, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { agentStarted } from "@/app/noteActions";
 import type { AgentPanel } from "@/app/state";
+import type { TerminalFontSetting } from "@/lib/terminal-font";
 import { useAppState, useDispatch } from "@/app/store";
 import { asGuiError, fixtureNotice } from "@/lib/gui-types";
 import { agentBridge, type AgentRun, type TerminalBridge, type TerminalExit, type TerminalStarted } from "@/lib/terminal";
@@ -141,7 +142,17 @@ function useSlotRect(slot: HTMLElement | null): Rect | null {
  * the notes handed off, frees the PTY after the exit frame, and kills the
  * agent when it unmounts while it may still run: a closed panel stops it.
  */
-function AgentPane({ agent, visible, bridge }: { agent: AgentPanel; visible: boolean; bridge: TerminalBridge<AgentRun> }) {
+function AgentPane({
+  agent,
+  visible,
+  font,
+  bridge,
+}: {
+  agent: AgentPanel;
+  visible: boolean;
+  font: TerminalFontSetting;
+  bridge: TerminalBridge<AgentRun>;
+}) {
   const dispatch = useDispatch();
   const started = useRef<number | null>(null);
   const killed = useRef(false);
@@ -189,6 +200,7 @@ function AgentPane({ agent, visible, bridge }: { agent: AgentPanel; visible: boo
       session={{ text: agent.text, date: agent.date }}
       bridge={bridge}
       label="Agent terminal"
+      font={font}
       visible={visible}
       onStarted={onStarted}
       onExit={onExit}
@@ -215,7 +227,7 @@ export function AgentHost({ bridge = agentBridge }: { bridge?: TerminalBridge<Ag
     >
       {agent && agent.status.kind !== "failed" ? (
         <Suspense fallback={null}>
-          <AgentPane key={agent.spawn} agent={agent} visible={shown} bridge={bridge} />
+          <AgentPane key={agent.spawn} agent={agent} visible={shown} font={s.terminalFont} bridge={bridge} />
         </Suspense>
       ) : null}
     </div>

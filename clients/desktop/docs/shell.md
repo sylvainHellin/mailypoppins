@@ -460,6 +460,9 @@ The Channel carries output as raw bytes (an `ArrayBuffer` per frame) that go to 
 - Unmounting disposes xterm and its addons and leaves the session running: killing the child is the owner's explicit `kill`.
 - The renderer is WebGL, with xterm's DOM renderer when WebGL refuses or its context is lost; unicode11 gives the CJK and emoji widths Neovim assumes, and the clipboard addon answers OSC 52.
 - Colours follow the palette on `<html>` and change with it, and the font is the app's `font-mono` at `text-sm` followed by the Nerd Fonts symbols the app ships, for the icons in the private use areas ([design-tokens.md](design-tokens.md), "Terminal").
+- The terminal font setting (Settings, "Terminal font") puts its family, in double quotes, before the app's stack and its size in place of `text-sm`; the symbols stay last whatever the setting.
+  The editor's pane and the agent's pane take it from `state.terminalFont`, which `src/app/terminalFont.ts` reads from `desktop.json` at startup.
+- A changed setting reaches every open pane at once: the pane sets xterm's `fontFamily` and `fontSize`, refits, sends the new columns and rows to the session through the resize path, and fetches the symbols font at the new size and redraws its glyphs as at mount.
 - The symbols font is fetched when a pane mounts, by `document.fonts.load` with one of its characters, since canvas text never starts the download of a `unicode-range` face; the spawn does not wait for it, and once it arrives the pane clears the WebGL renderer's glyph atlas and redraws every row, so an icon drawn before it does not stay blank.
   A failed load leaves the pane working, with a warning in the console.
 - The spawn carries the palette painted then (`currentScheme` in `src/app/theme.ts`, `dark` or `light`, a `system` theme already resolved), and the editor follows it: see "The embedded editor", "The editor's colours".
@@ -1086,6 +1089,8 @@ On a switch the focus follows into the view, on its "Mail" button, as in the oth
 - Editor command: the M3 editor setting through `editor_setting_get|set`, its placeholder the template in effect; Save with an empty field clears it, and the hint names `MP_DESKTOP_EDITOR` when that wins.
   On the embedded route the hint and the notice of a cleared setting say that drafts and received messages open in the embedded terminal editor, and that the template in effect opens config.toml and the log.
 - Editor colours: "Follow the app" and "The editor's own", the current one pressed, the `editor_colors` key of `desktop.json` (`app` or `editor`, unset is `app`); the next embedded editor started takes a change, and a refused write says "The editor colours were not saved: <why>" (see Compose, "The editor's colours").
+- Terminal font: a family and a size in px, the `terminal_font_family` and `terminal_font_size` keys of `desktop.json` ([rust-layer.md](rust-layer.md), "Desktop settings"), each blank for the app's; Save stores both, the open terminals take them at once, and the notice line says "The terminal draws in <family> at <size>".
+  A value the rules refuse shows its reason under the fields and writes neither key.
 
 A reload says what the swap did on the notice line, in the activity log's words: "Configuration reloaded: no account changed" or "Configuration reloaded: added ...; updated ...; removed ...".
 A refused one says "config.toml was not reloaded: <the daemon's sentence>".

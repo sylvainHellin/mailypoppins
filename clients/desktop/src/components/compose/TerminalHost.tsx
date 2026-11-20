@@ -24,6 +24,7 @@ import {
 import { useAppState, useDispatch } from "@/app/store";
 import type { Action } from "@/app/reducer";
 import type { EmbeddedSession } from "@/app/state";
+import type { TerminalFontSetting } from "@/lib/terminal-font";
 import { asGuiError, fixtureNotice } from "@/lib/gui-types";
 import { tauriBridge, type TerminalBridge, type TerminalExit, type TerminalStarted } from "@/lib/terminal";
 
@@ -76,7 +77,13 @@ function useSlotRect(slot: HTMLElement | null): Rect | null {
   return slot ? rect : null;
 }
 
-type PaneProps = { session: EmbeddedSession; visible: boolean; bridge: TerminalBridge; dispatch: Dispatch<Action> };
+type PaneProps = {
+  session: EmbeddedSession;
+  visible: boolean;
+  font: TerminalFontSetting;
+  bridge: TerminalBridge;
+  dispatch: Dispatch<Action>;
+};
 
 /**
  * One session's pane, keyed by the draft and its spawn. It frees the PTY
@@ -85,7 +92,7 @@ type PaneProps = { session: EmbeddedSession; visible: boolean; bridge: TerminalB
  * still run: a session the model forgot (Close the editor, a discard, the
  * draft's `state.remove`, Done) takes its process with it.
  */
-function EmbeddedPane({ session: c, visible, bridge, dispatch }: PaneProps) {
+function EmbeddedPane({ session: c, visible, font, bridge, dispatch }: PaneProps) {
   const started = useRef<number | null>(null);
   const killed = useRef(false);
   const mounted = useRef(false);
@@ -128,6 +135,7 @@ function EmbeddedPane({ session: c, visible, bridge, dispatch }: PaneProps) {
     <TerminalPane
       session={{ account: c.account, id: c.draftId, path: c.path }}
       bridge={bridge}
+      font={font}
       visible={visible}
       onStarted={onStarted}
       onExit={onExit}
@@ -157,7 +165,7 @@ export function TerminalHost({ bridge = tauriBridge }: { bridge?: TerminalBridge
       {sessions.length > 0 ? (
         <Suspense fallback={null}>
           {sessions.map(([key, c]) => (
-            <EmbeddedPane key={`${key}#${c.spawn}`} session={c} visible={key === shown} bridge={bridge} dispatch={dispatch} />
+            <EmbeddedPane key={`${key}#${c.spawn}`} session={c} visible={key === shown} font={s.terminalFont} bridge={bridge} dispatch={dispatch} />
           ))}
         </Suspense>
       ) : null}

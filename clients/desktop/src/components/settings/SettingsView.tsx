@@ -20,6 +20,8 @@ import {
 import { signInOrShow } from "@/app/signin";
 import { saveTheme, THEME_LABELS, THEMES, type Theme } from "@/app/theme";
 import { READER_MODE_LABELS, READER_MODES, saveReaderMode } from "@/app/readerMode";
+import { saveTerminalFont } from "@/app/terminalFont";
+import { TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN } from "@/lib/terminal-font";
 import { checkForUpdates, readUpdateStatus } from "@/app/updates";
 import { useAppState, useDispatch } from "@/app/store";
 import { conversationModeOn } from "@/app/state";
@@ -420,6 +422,71 @@ function EditorColorsField() {
 }
 
 /**
+ * The embedded terminal's font (`setting_get|set` of `terminal_font_family`
+ * and `terminal_font_size`): a family and a size, each blank for the app's;
+ * Save stores both, and every open terminal takes them at once.
+ */
+function TerminalFontField() {
+  const { terminalFont } = useAppState();
+  const dispatch = useDispatch();
+  const id = useId();
+  const [family, setFamily] = useState(terminalFont.family ?? "");
+  const [size, setSize] = useState(terminalFont.size?.toString() ?? "");
+  const [error, setError] = useState<string | null>(null);
+  // The stored setting arrives after startup, and a save answers what it holds.
+  useEffect(() => {
+    setFamily(terminalFont.family ?? "");
+    setSize(terminalFont.size?.toString() ?? "");
+  }, [terminalFont.family, terminalFont.size]);
+  const save = async () => setError(await saveTerminalFont(dispatch, family, size));
+  return (
+    <form
+      aria-label="Terminal font"
+      className="mt-3 flex flex-col gap-1"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <span className="text-sm text-muted-foreground">Terminal font</span>
+      <div className="flex gap-2">
+        <Input
+          id={`${id}-family`}
+          aria-label="Terminal font family"
+          aria-describedby={`${id}-font-hint`}
+          value={family}
+          placeholder="The app's mono font"
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(e) => setFamily(e.currentTarget.value)}
+        />
+        <Input
+          id={`${id}-size`}
+          aria-label="Terminal font size"
+          aria-describedby={`${id}-font-hint`}
+          className="w-20 shrink-0"
+          value={size}
+          placeholder="px"
+          inputMode="decimal"
+          autoComplete="off"
+          onChange={(e) => setSize(e.currentTarget.value)}
+        />
+        <Button type="submit" size="sm" variant="outline">
+          Save
+        </Button>
+      </div>
+      <p id={`${id}-font-hint`} className="text-xs text-muted-foreground">
+        One installed family, such as JetBrainsMono Nerd Font Mono, drawn before the app's mono font, and a size from {TERMINAL_FONT_SIZE_MIN} to{" "}
+        {TERMINAL_FONT_SIZE_MAX} px; blank keeps the app's. Open terminals take a change at once.
+      </p>
+      <p role="alert" className="min-h-4 text-xs text-destructive">
+        {error}
+      </p>
+    </form>
+  );
+}
+
+/**
  * The Settings view (clients/desktop/docs/shell.md, "Settings"): the
  * daemon's configuration as `config_get` reads it, read on every open and
  * after each `config.changed`. Settings change in config.toml, then Reload;
@@ -496,6 +563,7 @@ export function SettingsView() {
               <ReaderModeField />
               <EditorSettingField />
               <EditorColorsField />
+              <TerminalFontField />
             </section>
             <section aria-labelledby="settings-accounts">
               <h3 id="settings-accounts" className="mb-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">

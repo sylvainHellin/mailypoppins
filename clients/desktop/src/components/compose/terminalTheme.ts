@@ -3,6 +3,7 @@
 // in index.css alone; this file only names the tokens each xterm slot takes.
 
 import type { ITheme } from "@xterm/xterm";
+import { DEFAULT_TERMINAL_FONT, type TerminalFontSetting } from "@/lib/terminal-font";
 
 /** xterm's theme slot, and the token that fills it. */
 export const TERMINAL_TOKENS = {
@@ -60,13 +61,20 @@ const SYMBOLS_SAMPLE = "\u{F0188}";
 /**
  * The app's mono font, as the host's `font-mono text-sm` classes resolve it,
  * with the symbols font after it for the icons no system mono font carries.
+ * The terminal font setting (src/app/terminalFont.ts) puts its family, in
+ * double quotes, before that stack, and its size in place of the host's; its
+ * family holds no quote, comma or backslash, so the quotes always close.
  */
-export function terminalFont(host: Element): { fontFamily: string; fontSize: number } {
+export function terminalFont(
+  host: Element,
+  setting: TerminalFontSetting = DEFAULT_TERMINAL_FONT,
+): { fontFamily: string; fontSize: number } {
   const style = getComputedStyle(host);
   const size = Number.parseFloat(style.fontSize);
+  const chosen = setting.family ? `"${setting.family}", ` : "";
   return {
-    fontFamily: `${style.fontFamily.trim() || "monospace"}, "${SYMBOLS_FONT}"`,
-    fontSize: Number.isFinite(size) && size > 0 ? size : 14,
+    fontFamily: `${chosen}${style.fontFamily.trim() || "monospace"}, "${SYMBOLS_FONT}"`,
+    fontSize: setting.size ?? (Number.isFinite(size) && size > 0 ? size : 14),
   };
 }
 

@@ -2,6 +2,7 @@
 
 import type { Theme } from "@/app/theme";
 import type { ReaderMode } from "@/app/readerMode";
+import type { TerminalFontSetting } from "@/lib/terminal-font";
 import type {
   AccountStateChangedPayload,
   Bootstrap,
@@ -292,6 +293,7 @@ export type Action =
   | { type: "version_info"; info: VersionInfo }
   | { type: "theme_set"; theme: Theme }
   | { type: "reader_mode_set"; mode: ReaderMode }
+  | { type: "terminal_font_set"; font: TerminalFontSetting }
   | { type: "draft_view_toggled"; key: string }
   | { type: "draft_view_reset" }
   | { type: "accounts_loaded"; gen: number; accounts: AccountInfo[] }
@@ -1908,6 +1910,8 @@ function reduce(s: AppState, a: Action): AppState {
       return s.theme === a.theme ? s : { ...s, theme: a.theme };
     case "reader_mode_set":
       return s.readerMode === a.mode ? s : { ...s, readerMode: a.mode };
+    case "terminal_font_set":
+      return s.terminalFont.family === a.font.family && s.terminalFont.size === a.font.size ? s : { ...s, terminalFont: a.font };
     case "draft_view_toggled":
       return { ...s, draftHtml: s.draftHtml === a.key ? null : a.key };
     case "draft_view_reset":

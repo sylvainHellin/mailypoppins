@@ -17,6 +17,7 @@ import "@/components/compose/terminal-font.css";
 import { tauriBridge, type DraftRun, type TerminalBridge, type TerminalExit, type TerminalStarted } from "@/lib/terminal";
 import { loadSymbolsFont, terminalFont, terminalTheme } from "@/components/compose/terminalTheme";
 import { currentScheme } from "@/app/theme";
+import { DEFAULT_TERMINAL_FONT, type TerminalFontSetting } from "@/lib/terminal-font";
 
 /** How long a run of container resizes settles before the PTY hears of it. */
 export const RESIZE_DEBOUNCE_MS = 50;
@@ -28,6 +29,8 @@ export type TerminalPaneProps<R extends object = DraftRun> = {
   bridge?: TerminalBridge<R>;
   /** The terminal's accessible name. */
   label?: string;
+  /** The terminal font setting; unset draws in the app's mono font. A change applies at once. */
+  font?: TerminalFontSetting;
   /** Hidden keeps the terminal and its buffer; shown again, it refits and takes the focus. */
   visible: boolean;
   onStarted?: (started: TerminalStarted) => void;
@@ -70,12 +73,13 @@ function safeFit(fit: FitAddon): void {
   }
 }
 
-type Live = { sync: () => void; focus: () => void };
+type Live = { sync: () => void; focus: () => void; restyle: () => void };
 
 export function TerminalPane<R extends object = DraftRun>({
   session,
   bridge = tauriBridge as unknown as TerminalBridge<R>,
   label = "Editor terminal",
+  font = DEFAULT_TERMINAL_FONT,
   visible,
   onStarted,
   onExit,
@@ -83,8 +87,8 @@ export function TerminalPane<R extends object = DraftRun>({
 }: TerminalPaneProps<R>) {
   const hostRef = useRef<HTMLDivElement>(null);
   const live = useRef<Live | null>(null);
-  const latest = useRef({ session, bridge, visible, onStarted, onExit, onError });
-  latest.current = { session, bridge, visible, onStarted, onExit, onError };
+  const latest = useRef({ session, bridge, font, visible, onStarted, onExit, onError });
+  latest.current = { session, bridge, font, visible, onStarted, onExit, onError };
   const wasVisible = useRef(visible);
 
   useEffect(() => {
@@ -93,7 +97,7 @@ export function TerminalPane<R extends object = DraftRun>({
     const { session: draft, bridge: pty } = latest.current;
     const report = (e: unknown) => latest.current.onError?.(e);
 
-    const font = terminalFont(host);
+    const font = terminalFont(host, latest.current.font);
     const term = new Terminal({ allowProposedApi: true, theme: terminalTheme(), ...font });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -116,14 +120,16 @@ export function TerminalPane<R extends object = DraftRun>({
     // The WebGL renderer caches each glyph in a texture atlas the first time
     // it draws it, so an icon drawn before the symbols font arrived stays a
     // blank cell until the atlas is rebuilt. The spawn does not wait for it.
-    loadSymbolsFont(font.fontSize).then(
-      () => {
-        if (disposed) return;
-        term.clearTextureAtlas();
-        term.refresh(0, term.rows - 1);
-      },
-      (e: unknown) => console.warn("the terminal's symbols font did not load; Nerd Font icons draw blank", e),
-    );
+    const loadSymbols = (size: number) =>
+      loadSymbolsFont(size).then(
+        () => {
+          if (disposed) return;
+          term.clearTextureAtlas();
+          term.refresh(0, term.rows - 1);
+        },
+        (e: unknown) => console.warn("the terminal's symbols font did not load; Nerd Font icons draw blank", e),
+      );
+    void loadSymbols(font.fontSize);
 
     const sync = () => {
       if (disposed) return;
@@ -132,6 +138,19 @@ export function TerminalPane<R extends object = DraftRun>({
       if (term.cols === sent.cols && term.rows === sent.rows) return;
       sent = { cols: term.cols, rows: term.rows };
       pty.resize(started, sent.cols, sent.rows).catch(report);
+    };
+
+    // A changed font setting: the new cells fit another grid, which the
+    // session hears of through the resize path, and the symbols are fetched
+    // and redrawn at the new size.
+    const restyle = () => {
+      if (disposed) return;
+      const next = terminalFont(host, latest.current.font);
+      if (next.fontFamily === term.options.fontFamily && next.fontSize === term.options.fontSize) return;
+      term.options.fontFamily = next.fontFamily;
+      term.options.fontSize = next.fontSize;
+      sync();
+      void loadSymbols(next.fontSize);
     };
 
     let settle: ReturnType<typeof setTimeout> | undefined;
@@ -185,7 +204,7 @@ export function TerminalPane<R extends object = DraftRun>({
     // cancels the first pane's spawn instead of starting two editors.
     const pending = setTimeout(start, 0);
 
-    live.current = { sync, focus: () => term.focus() };
+    live.current = { sync, focus: () => term.focus(), restyle };
     return () => {
       disposed = true;
       clearTimeout(pending);
@@ -198,6 +217,10 @@ export function TerminalPane<R extends object = DraftRun>({
       live.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    live.current?.restyle();
+  }, [font.family, font.size]);
 
   useEffect(() => {
     if (visible && !wasVisible.current) {

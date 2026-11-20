@@ -135,8 +135,8 @@ describe("the route", () => {
     });
     await shellReady();
     await replyEmbedded(user);
-    await waitFor(() => expect(terms.at(-1)?.options).toMatchObject({ fontSize: 16 }));
-    expect(terms.at(-1)?.options.fontFamily).toMatch(/^"JetBrainsMono Nerd Font Mono", .+, "Symbols Nerd Font Mono"$/);
+    await waitFor(() => expect(terms[terms.length - 1]?.options).toMatchObject({ fontSize: 16 }));
+    expect(terms[terms.length - 1]?.options.fontFamily).toMatch(/^"JetBrainsMono Nerd Font Mono", .+, "Symbols Nerd Font Mono"$/);
   });
 
   it("follows the setting: a GUI editor keeps editor_open, a terminal editor's full path spawns", async () => {

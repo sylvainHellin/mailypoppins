@@ -4,6 +4,7 @@
 import type { Theme } from "@/app/theme";
 import type { Dismissal } from "@/app/health";
 import type { ReaderMode } from "@/app/readerMode";
+import type { TerminalFontSetting } from "@/lib/terminal-font";
 import type { Action } from "@/app/reducer";
 import type { CalendarLoad } from "@/app/calendar";
 import type { RepeatFields } from "@/app/recurrence";
@@ -1006,6 +1007,8 @@ export type AppState = {
   theme: Theme;
   /** How the reader shows a message, as stored in desktop.json (src/app/readerMode.ts); html until it is read. */
   readerMode: ReaderMode;
+  /** The embedded terminal's font, as stored in desktop.json (src/app/terminalFont.ts); unset until it is read. */
+  terminalFont: TerminalFontSetting;
   /**
    * The `targetKey` of the one draft whose preview shows its send HTML rather
    * than its Markdown, which `tt` flips on a draft; never stored, and cleared
@@ -1325,6 +1328,8 @@ export function initialState(prefs: Prefs = DEFAULT_PREFS): AppState {
     theme: "dark",
     // readerMode.ts's DEFAULT_READER_MODE, spelled out for the same reason.
     readerMode: "html",
+    // terminalFont.ts's DEFAULT_TERMINAL_FONT, spelled out for the same reason.
+    terminalFont: { family: null, size: null },
     draftHtml: null,
     draftRevs: { epoch: 0, of: {}, seen: {} },
     bodyRevs: {},

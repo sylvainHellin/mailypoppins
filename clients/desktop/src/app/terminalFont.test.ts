@@ -3,15 +3,15 @@
 // stack terminalTheme.ts builds from it.
 
 import { afterEach, describe, expect, it } from "vitest";
+import { loadTerminalFont } from "@/app/terminalFont";
 import {
   DEFAULT_TERMINAL_FONT,
   familyRefusal,
-  loadTerminalFont,
   parseFontFamily,
   parseFontSize,
   sizeRefusal,
   TERMINAL_FONT_FAMILY_MAX,
-} from "@/app/terminalFont";
+} from "@/lib/terminal-font";
 import { terminalFont } from "@/components/compose/terminalTheme";
 import * as cmd from "@/lib/commands";
 import { mock, resetMock } from "@/test/tauri-mock";
