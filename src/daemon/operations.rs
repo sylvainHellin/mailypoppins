@@ -278,6 +278,22 @@ impl OperationHandle {
         });
     }
 
+    /// Finish cancelled, as `operation.cancel` would: the work it awaited was
+    /// stopped by a cancel, of this operation or of another one awaiting the
+    /// same work (PERSO-321). Shuts the token first, so the worker's own
+    /// checks agree.
+    pub fn cancel(&self) {
+        self.token.cancel();
+        self.shared.mutate(&self.id, |status| {
+            if status.state.is_terminal() {
+                return None;
+            }
+            status.state = OperationState::Cancelled;
+            status.error = Some(cancelled_error(&status.id));
+            Some(finished_event(status))
+        });
+    }
+
     /// Finish with an error.
     pub fn fail(&self, error: DomainError) {
         self.shared.mutate(&self.id, |status| {
@@ -599,12 +615,17 @@ impl OperationRegistry {
 fn settle_cancelled(entry: &mut Entry) -> Event {
     entry.token.cancel();
     entry.status.state = OperationState::Cancelled;
-    entry.status.error = Some(DomainError::new(
-        ErrorCode::OperationCancelled,
-        format!("operation {} was cancelled", entry.status.id),
-        Some(json!({"operation_id": entry.status.id.as_str()})),
-    ));
+    entry.status.error = Some(cancelled_error(&entry.status.id));
     finished_event(&entry.status)
+}
+
+/// The error a cancelled operation settles with.
+fn cancelled_error(id: &OperationId) -> DomainError {
+    DomainError::new(
+        ErrorCode::OperationCancelled,
+        format!("operation {id} was cancelled"),
+        Some(json!({"operation_id": id.as_str()})),
+    )
 }
 
 /// Lock, recovering from a poisoned mutex: every section between a lock and its

@@ -279,6 +279,7 @@ mod tests {
             contacts: None,
             calendar_changed: false,
             calendar: None,
+            stopped: false,
         }
     }
 

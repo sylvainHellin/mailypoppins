@@ -81,6 +81,7 @@ use mp_protocol::events::SyncCompleted;
 use tokio::sync::watch;
 
 use crate::config::AccountConfig;
+use crate::daemon::dispatch::CancelToken;
 use crate::daemon::sync_outcome::from_sync_result;
 use crate::engine_lock::EngineLock;
 use crate::sync::tick::run_tick_with_drains;
@@ -219,6 +220,12 @@ pub struct TickOutcome {
     /// sync that failed, whose error is the tick's [`TickOutcome::error`].
     /// A joiner keeps it, since it is a report and commits nothing.
     pub calendar: Option<mp_protocol::calendar::CalendarSynced>,
+    /// Whether the tick's body stopped short because a caller asked it to,
+    /// its runner's cancel or the cancel of a pass that joined it
+    /// (PERSO-321); the same for the runner and every joiner. A stopped tick
+    /// is a cancelled sync for everyone who awaited it: its outcome is not
+    /// committed, and a pass awaiting it settles `cancelled`.
+    pub stopped: bool,
 }
 
 /// What one [`AccountRuntime::drain`] did.
@@ -362,8 +369,9 @@ pub struct AccountRuntime {
     /// The account's body-fetch budget, `None` when configured as `0`.
     body_deadline: Option<Duration>,
     /// `Some` while a tick is running: its receiver resolves to that tick's
-    /// outcome, which is what a joiner returns.
-    running: Mutex<Option<watch::Receiver<Option<TickOutcome>>>>,
+    /// outcome, which is what a joiner returns, and its stop request is what
+    /// a joiner's cancel sets.
+    running: Mutex<Option<RunningTick>>,
     /// The engine turn a tick's run and a drain both hold for their whole
     /// length, so neither runs beside the other (#0133).
     turn: tokio::sync::Mutex<()>,
@@ -427,13 +435,32 @@ pub type DraftsHook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 /// once by [`AccountRuntime::attach_draft_watch`].
 pub(super) type DraftWatchCell = Arc<std::sync::OnceLock<Arc<crate::daemon::watch::DraftWatch>>>;
 
+/// The tick in flight, as a caller that joins it sees it.
+#[derive(Clone)]
+struct RunningTick {
+    /// Resolves to the tick's outcome once it is over.
+    outcome: watch::Receiver<Option<TickOutcome>>,
+    /// Set by a joiner whose pass was cancelled while it waited (PERSO-321):
+    /// the runner's body asks it at every stop point, as it asks its own
+    /// stop.
+    stop_asked: Arc<AtomicBool>,
+}
+
 /// Which side of the join a [`AccountRuntime::tick`] call is on, decided under
 /// the lock and acted on outside it.
 enum Slot {
     /// This call starts the run and publishes its outcome.
-    Run(watch::Sender<Option<TickOutcome>>),
+    Run(watch::Sender<Option<TickOutcome>>, Arc<AtomicBool>),
     /// This call attaches to a run already in flight.
-    Join(watch::Receiver<Option<TickOutcome>>),
+    Join(RunningTick),
+}
+
+/// Resolve once `cancel` is shut; never without one.
+async fn cancelled(cancel: Option<&CancelToken>) {
+    match cancel {
+        Some(token) => token.cancelled().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Take a lock whose holder may have panicked. What is behind it is one
@@ -791,7 +818,7 @@ impl AccountRuntime {
         let running = {
             let running = lock(&self.running);
             self.retired.send_replace(true);
-            running.clone()
+            running.as_ref().map(|tick| tick.outcome.clone())
         };
         let overran = || {
             warn!(
@@ -831,18 +858,26 @@ impl AccountRuntime {
 
     /// Run one tick, or attach to the one already running.
     pub async fn tick(&self, kind: TickKind) -> TickOutcome {
-        self.tick_until(kind, None).await
+        self.tick_until(kind, None, None).await
     }
 
     /// [`AccountRuntime::tick`], whose body asks `stop` at every fetch chunk
     /// and mailbox boundary when this call is the one that runs it
     /// (PERSO-127).
     ///
-    /// A call that joins a tick already in flight does not stop it: that tick
-    /// is another caller's work, and its `stop` (or its lack of one) is the
-    /// one it runs under. A tick that is stopped ends with what it ingested
-    /// before the stop, and a caller that joined it is handed that outcome.
-    pub async fn tick_until(&self, kind: TickKind, stop: Option<Stop>) -> TickOutcome {
+    /// A call that joins a tick already in flight and whose `cancel` shuts
+    /// while it waits stops that tick too (PERSO-321): the user asked for the
+    /// sync of the account to stop, whoever started the tick, and the
+    /// scheduler and the watcher tick again later anyway. The body then stops
+    /// at its next stop point, as for its runner's own stop, and the outcome
+    /// every caller of the tick is handed says so ([`TickOutcome::stopped`]).
+    /// A tick that is stopped ends with what it ingested before the stop.
+    pub async fn tick_until(
+        &self,
+        kind: TickKind,
+        stop: Option<Stop>,
+        cancel: Option<&CancelToken>,
+    ) -> TickOutcome {
         if self.readiness != Readiness::Ready {
             // No phase, no hook, no login: the holder is doing the work.
             debug!("[daemon] {} refused a {kind:?} tick: blocked", self.account);
@@ -858,6 +893,7 @@ impl AccountRuntime {
                 contacts: None,
                 calendar_changed: false,
                 calendar: None,
+                stopped: false,
             };
         }
 
@@ -881,20 +917,33 @@ impl AccountRuntime {
                     contacts: None,
                     calendar_changed: false,
                     calendar: None,
+                    stopped: false,
                 };
             }
             match running.as_ref() {
-                Some(receiver) => Slot::Join(receiver.clone()),
+                Some(tick) => Slot::Join(tick.clone()),
                 None => {
                     let (sender, receiver) = watch::channel(None);
-                    *running = Some(receiver);
-                    Slot::Run(sender)
+                    let stop_asked = Arc::new(AtomicBool::new(false));
+                    *running = Some(RunningTick {
+                        outcome: receiver,
+                        stop_asked: Arc::clone(&stop_asked),
+                    });
+                    Slot::Run(sender, stop_asked)
                 }
             }
         };
 
-        let sender = match slot {
-            Slot::Join(mut receiver) => {
+        let (sender, stop_asked) = match slot {
+            Slot::Join(RunningTick {
+                outcome: mut receiver,
+                stop_asked,
+            }) => {
+                debug!(
+                    "[daemon] {}: a {kind:?} tick joined the one in flight",
+                    self.account
+                );
+                let mut asked = false;
                 // The slot is cleared before the outcome is published, so a
                 // closed channel here can only mean the runner panicked.
                 loop {
@@ -908,7 +957,20 @@ impl AccountRuntime {
                         outcome.calendar_changed = false;
                         return outcome;
                     }
-                    if receiver.changed().await.is_err() {
+                    let changed = tokio::select! {
+                        changed = receiver.changed() => changed,
+                        () = cancelled(cancel), if !asked => {
+                            info!(
+                                "[daemon] {}: a pass that joined the tick in flight was \
+                                 cancelled; stopping that tick",
+                                self.account
+                            );
+                            stop_asked.store(true, Ordering::SeqCst);
+                            asked = true;
+                            continue;
+                        }
+                    };
+                    if changed.is_err() {
                         warn!(
                             "[daemon] {} joined a tick that never reported",
                             self.account
@@ -927,11 +989,29 @@ impl AccountRuntime {
                             contacts: None,
                             calendar_changed: false,
                             calendar: None,
+                            stopped: false,
                         };
                     }
                 }
             }
-            Slot::Run(sender) => sender,
+            Slot::Run(sender, stop_asked) => (sender, stop_asked),
+        };
+        // The body's stop: the runner's own, and then what a joiner asked,
+        // asked after the runner's because that one may wait (the commit-hold
+        // hook of a test). Whether it ever said stop is what the outcome
+        // reports.
+        let stopped = Arc::new(AtomicBool::new(false));
+        let own_stop = stop;
+        let stop = {
+            let stopped = Arc::clone(&stopped);
+            Some(Stop::new(move |point| {
+                let own = crate::sync::stops_at(own_stop.as_ref(), point);
+                let halt = own || stop_asked.load(Ordering::SeqCst);
+                if halt {
+                    stopped.store(true, Ordering::SeqCst);
+                }
+                halt
+            }))
         };
 
         let outcome = {
@@ -952,6 +1032,7 @@ impl AccountRuntime {
                     contacts: None,
                     calendar_changed: false,
                     calendar: None,
+                    stopped: false,
                 }
             } else {
                 let outcome = if self.config.syncs_only_a_calendar() {
@@ -969,6 +1050,7 @@ impl AccountRuntime {
                         contacts: None,
                         calendar_changed: false,
                         calendar: None,
+                        stopped: false,
                     }
                 } else {
                     self.run_tick(kind, stop).await
@@ -984,6 +1066,12 @@ impl AccountRuntime {
         // server API and touches no mail queue, so a drain an interactive
         // mutation asked for does not wait behind it.
         let mut outcome = outcome;
+        outcome.stopped = stopped.load(Ordering::SeqCst);
+        if outcome.stopped {
+            // A stopped tick owes no backlog: the user asked the syncing to
+            // stop, and the scheduler's next tick comes at its interval.
+            self.backlog.store(false, Ordering::SeqCst);
+        }
         if !outcome.blocked {
             let polled = self.sync_calendar().await;
             outcome.calendar_changed = polled.changed();
@@ -1110,6 +1198,7 @@ impl AccountRuntime {
             contacts,
             calendar_changed: false,
             calendar: None,
+            stopped: false,
         }
     }
 
@@ -1900,6 +1989,90 @@ mod tests {
         assert_eq!(outcome.status, "");
         assert_eq!(outcome.error, None);
         assert!(!outcome.blocked && !outcome.joined);
+    }
+
+    /// PERSO-321: a joiner whose cancel shuts while it waits stops the tick it
+    /// joined, run by a caller with no stop of its own (the watcher, the
+    /// scheduler). The body stops at its next stop point, every caller of the
+    /// tick is told it stopped, a joiner that was not cancelled included, and
+    /// the stopped tick owes no backlog; the next tick runs to its end.
+    #[tokio::test]
+    async fn a_cancelled_joiner_stops_the_tick_it_joined_for_every_caller() {
+        use crate::sync::StopPoint;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = TickReport::default();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let mut hooks = quiet_hooks();
+        hooks.body = {
+            let report = report.clone();
+            let entered = Arc::clone(&entered);
+            Arc::new(move |ctx: TickContext| {
+                let report = report.clone();
+                let entered = Arc::clone(&entered);
+                async move {
+                    entered.notify_one();
+                    // A body that asks its stop between batches, for at most
+                    // a second, and reports a backlog it did not drain.
+                    for _ in 0..200 {
+                        if crate::sync::stops_at(ctx.stop.as_ref(), StopPoint::Chunk) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    *lock(&report.sync) = Some(SyncResult {
+                        backlogged: vec!["Inbox".to_string()],
+                        ..Default::default()
+                    });
+                    Ok(())
+                }
+                .boxed()
+            })
+        };
+        let runtime = Arc::new(
+            AccountRuntime::start_at_with_hooks(dir.path(), config("alpha", 0), 1, hooks)
+                .expect("a free lock")
+                .with_report(report),
+        );
+
+        let runner = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.tick(TickKind::Quick).await }
+        });
+        entered.notified().await;
+        let bystander = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move { runtime.tick(TickKind::Quick).await }
+        });
+        let cancel = CancelToken::new();
+        let joiner = {
+            let runtime = Arc::clone(&runtime);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                runtime
+                    .tick_until(TickKind::Full, None, Some(&cancel))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = std::time::Instant::now();
+        cancel.cancel();
+
+        let ran = runner.await.expect("the runner");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the body stopped at its next stop point, not at its end"
+        );
+        assert!(ran.stopped && !ran.joined, "{ran:?}");
+        assert!(ran.sync.is_some(), "the runner still carries what it did");
+        let joined = joiner.await.expect("the joiner");
+        assert!(joined.stopped && joined.joined, "{joined:?}");
+        let watched = bystander.await.expect("the other joiner");
+        assert!(watched.stopped && watched.joined, "{watched:?}");
+        assert!(!runtime.backlog_owed(), "a stopped tick owes no backlog");
+
+        let next = runtime.tick(TickKind::Quick).await;
+        assert!(!next.stopped, "a stop belongs to the tick it was asked of");
+        assert!(runtime.backlog_owed());
     }
 
     /// A body that fails is reported on the outcome, and the tail still ran.

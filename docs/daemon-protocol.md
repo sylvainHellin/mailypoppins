@@ -1511,7 +1511,8 @@ The mailboxes already ingested stay written, since a pass is idempotent and the 
 The prune pass never runs after a cancel, and the outbox and mutation drains at either end of the pass are not stopped.
 A cancelled pass publishes no `sync.completed` and leaves the account's `sync_health` as it was.
 It does announce the mailboxes it kept: one `state.invalidate` of `mailbox:<account>/<slug>` with scope `{"query": "counts"}` per mailbox whose counts it moved, before its worker returns, so another client re-reads them without waiting for the next tick; a cancelled dry run announces nothing.
-A pass that joined an account tick already running, the scheduler's, the watcher's or another client's, does not stop that tick, which then completes and publishes its outcome as usual.
+A pass that joined an account tick already running, the scheduler's, the watcher's or another client's, and is cancelled stops that tick too, at its next stop point (PERSO-321): the user asked for the sync of the account to stop, whoever started it, and the scheduler and the watcher tick again later.
+A tick a cancel stopped, its runner's or a joiner's, publishes no `sync.completed`, owes no backlog, and is a cancelled sync for every pass awaiting it: a `sync.quick` or `sync.full` that ran it or joined it settles `cancelled` with `operation_cancelled`, even when that pass's own client did not cancel it.
 
 Cancelling an operation that has already finished is `-32602` with `data` of `{operation_id, state}`, naming the state that made the cancel impossible, and both `operation.cancel` and `operation.status` refuse an id the daemon never issued with `-32602` and `data` of `{operation_id}`.
 

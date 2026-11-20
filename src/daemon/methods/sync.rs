@@ -91,8 +91,12 @@
 //! other client would otherwise have refreshed them on.
 //!
 //! A pass that joined a runtime tick already in flight (the scheduler's, the
-//! watcher's, another client's) does not stop that tick, which is not its
-//! work; its cancel only stops it waiting.
+//! watcher's, another client's) and is cancelled stops that tick as well
+//! (PERSO-321): the user asked for the sync of the account to stop, whoever
+//! started it, and the scheduler and the watcher tick again later anyway. A
+//! tick a cancel stopped commits no outcome, and every pass awaiting it,
+//! its runner's included, settles `cancelled`, so no client reads a pass
+//! that stopped half way as one that finished.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -699,6 +703,13 @@ async fn run_pass_to_end(
         )
         .await
         .filter(|outcome| !outcome.blocked);
+        // A tick a cancel stopped, this pass's or that of another pass
+        // awaiting the same tick, is a cancelled sync for this pass too
+        // (PERSO-321): saying it succeeded would claim a pass that did not
+        // finish.
+        if outcome.as_ref().is_some_and(|outcome| outcome.stopped) {
+            handle.cancel();
+        }
         if handle.token.is_cancelled() {
             return publish_cancelled(&request, &canonical).await;
         }
