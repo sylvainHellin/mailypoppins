@@ -410,32 +410,28 @@ impl WireServers {
     }
 
     /// Wait until the daemon's first drain of `account` under `root` has
-    /// sent what the account's seeded outbox owed: no row left to submit and
-    /// no copy left to file.
+    /// run: with the servers answering, the account's seeded outbox has
+    /// then sent what it owed, and no row is left to submit or to file.
     ///
     /// An account with a server gets a drainer, which a local-only one does
     /// not, and it drains once [`DRAIN_DEBOUNCE`] after the daemon starts
     /// (`src/daemon/runtime/drainer.rs`): a fixture's queued rows go out
-    /// then, beside whatever the test does. A test waits for that first,
-    /// so its own send never meets a drain already running, and then sets
-    /// the servers up for what it tests.
+    /// then, beside whatever the test does, and even an empty outbox costs
+    /// that drain its engine turn. A test waits for it first, so its own send
+    /// never meets a drain already running, and then sets the servers up for
+    /// what it tests. The drain's end is the drainer's `published` line in
+    /// the daemon's log, which logs at debug level to `<root>/logs`.
     ///
     /// [`DRAIN_DEBOUNCE`]: mailypoppins::daemon::runtime::drainer::DRAIN_DEBOUNCE
     pub fn await_startup_drain(&self, root: &Path, account: &str) {
-        let store = root.join("accounts").join(account).join("store.sqlite3");
-        if !store.exists() {
-            return;
-        }
+        let published = format!("[drainer] published {account}");
         wait_for(&format!("the first drain of {account}"), || {
-            let store = mailypoppins::store::Store::open(&store).expect("open the account's store");
-            let rows = mailypoppins::outbox::unfinished_rows(&store, account).expect("the rows");
-            rows.iter().all(|row| {
-                !matches!(
-                    row.state,
-                    mailypoppins::outbox::OutboxState::PendingSend
-                        | mailypoppins::outbox::OutboxState::SentPendingAppend
-                )
-            })
+            fs::read_dir(root.join("logs"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|file| fs::read_to_string(file.path()).ok())
+                .any(|text| text.lines().any(|line| line.ends_with(&published)))
         });
     }
 }

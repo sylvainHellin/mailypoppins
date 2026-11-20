@@ -3464,16 +3464,17 @@ async fn a_send_result_renders_through_the_shared_wordings() {
 /// nothing reaches the transport.
 ///
 /// Routed side only (fake servers). The account mirrors its drafts, and its
-/// IMAP server refuses every login once the daemon is up, which is a Drafts
-/// folder the guard cannot reach.
+/// IMAP server refuses every login, which is a Drafts folder the guard cannot
+/// reach.
 #[tokio::test]
 async fn a_mirrored_draft_is_not_sent_when_its_server_copy_cannot_be_claimed() {
     let slice = Slice::wired_with(
         |_| Vec::new(),
-        |wire, root| wire.wire_mirroring(root, fixture::ACCOUNT),
+        |wire, root| {
+            wire.wire_mirroring(root, fixture::ACCOUNT);
+            wire.imap.set_policy(LoginPolicy::Reject);
+        },
     );
-    slice.wire().imap.set_policy(LoginPolicy::Reject);
-    slice.wire().imap.drop_sessions();
     let path = fixture::drafts_dir(slice.root(), fixture::ACCOUNT).join(fixture::APPROVED_FILE);
     let text = std::fs::read_to_string(&path).unwrap();
     let pushed = text.replacen(
