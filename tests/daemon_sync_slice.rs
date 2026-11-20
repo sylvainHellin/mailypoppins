@@ -2080,23 +2080,7 @@ mod wire {
         wire.imap
             .garble_idlers(b"Server Unavailable. 15\r\n* BYE Connection closed.\r\n");
 
-        let failed = format!("[watcher] watching {ACCOUNT} failed");
-        let mut line = String::new();
-        wait_for("the watcher's failure in the daemon log", || {
-            let logs: String = std::fs::read_dir(wire.root().join("logs"))
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|file| std::fs::read_to_string(file.path()).ok())
-                .collect();
-            match logs.lines().find(|l| l.contains(&failed)) {
-                Some(found) => {
-                    line = found.to_string();
-                    true
-                }
-                None => false,
-            }
-        });
+        let line = log_line(&wire, &format!("[watcher] watching {ACCOUNT} failed"));
         assert!(
             line.ends_with(
                 "failed (1 in a row): the server sent an answer mp cannot read: \
@@ -2104,6 +2088,51 @@ mod wire {
             ),
             "{line}"
         );
+    }
+
+    /// The watcher's second SELECT, the one that reads what a change left,
+    /// logs an answer it cannot read in the server's words too (PERSO-323).
+    #[test]
+    fn the_watchers_re_read_logs_an_answer_it_cannot_read_in_the_servers_words() {
+        let wire = served();
+        wait_for("the daemon's watcher to idle", || wire.imap.idles() > 0);
+        wire.imap.garble_next_select(
+            INBOX,
+            b"Server Unavailable. 15\r\n* BYE Connection closed.\r\n",
+        );
+        wire.imap
+            .deliver(INBOX, mail("third", "cy@example.org", "Third", "three"));
+
+        let failed = format!("Could not re-read '{INBOX}' after its change");
+        let line = log_line(&wire, &failed);
+        assert!(
+            line.ends_with(
+                "after its change: the server sent an answer mp cannot read: \
+                 \"Server Unavailable. 15 / * BYE Connection closed.\""
+            ),
+            "{line}"
+        );
+    }
+
+    /// The first line of the daemon's log that holds `needle`, waited for.
+    fn log_line(wire: &WireRoot, needle: &str) -> String {
+        let mut line = String::new();
+        wait_for(&format!("`{needle}` in the daemon log"), || {
+            let logs: String = std::fs::read_dir(wire.root().join("logs"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|file| std::fs::read_to_string(file.path()).ok())
+                .collect();
+            match logs.lines().find(|l| l.contains(needle)) {
+                Some(found) => {
+                    line = found.to_string();
+                    true
+                }
+                None => false,
+            }
+        });
+        line
     }
 
     /// `mp watch --timeout 1` on a mailbox nothing arrives in gives up after

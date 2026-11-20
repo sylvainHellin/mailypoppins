@@ -118,7 +118,11 @@ pub async fn watch_mailbox_since(
         match session.select(mailbox).await {
             Ok(after) => state_of(&after),
             Err(e) => {
-                warn!("Could not re-read '{}' after its change: {}", mailbox, e);
+                warn!(
+                    "Could not re-read '{}' after its change: {}",
+                    mailbox,
+                    crate::imap_client::words::server_words(&e)
+                );
                 at_select
             }
         }

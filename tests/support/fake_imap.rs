@@ -51,7 +51,8 @@
 //! untagged `EXISTS` (RFC 2177 3); [`RejectingImapServer::idles`] counts the
 //! IDLEs entered, so a test delivers once the client is listening. A test can
 //! also send every idling session an answer no client can read and close it
-//! ([`RejectingImapServer::garble_idlers`]).
+//! ([`RejectingImapServer::garble_idlers`]), or answer the next `SELECT` of a
+//! folder so ([`RejectingImapServer::garble_next_select`]).
 //!
 //! A test can make the server refuse any command with a tagged answer of its
 //! own ([`RejectingImapServer::refuse`]), and answer a `SEARCH` the way TUM's
@@ -261,6 +262,9 @@ struct Shared {
     idlers: Mutex<Vec<(String, futures::channel::mpsc::UnboundedSender<Wake>)>>,
     /// How many IDLE commands the server has entered.
     idles: AtomicUsize,
+    /// The bytes the next `SELECT` or `EXAMINE` of a folder is answered
+    /// with, as they are, before the connection closes, by folder.
+    garbled_selects: Mutex<HashMap<String, Vec<u8>>>,
     /// The messages, by UID, a FETCH leaves out, and the tagged answer it
     /// ends with when it named one of them.
     fetch_refusals: Mutex<HashMap<u32, String>>,
@@ -349,6 +353,7 @@ impl RejectingImapServer {
             append_delay_ms: AtomicU64::new(0),
             idlers: Mutex::new(Vec::new()),
             idles: AtomicUsize::new(0),
+            garbled_selects: Mutex::new(HashMap::new()),
             fetch_refusals: Mutex::new(HashMap::new()),
             chunk_refusal: Mutex::new(None),
             hangups: Mutex::new(std::collections::HashSet::new()),
@@ -596,6 +601,16 @@ impl RejectingImapServer {
         for (_, wake) in self.shared.idlers.lock().expect("the idlers").iter() {
             let _ = wake.unbounded_send(Wake::Garbled(bytes.to_vec()));
         }
+    }
+
+    /// Answer the next `SELECT` or `EXAMINE` of `folder` with `bytes` as
+    /// they are, then close the connection; the one after is served again.
+    pub fn garble_next_select(&self, folder: &str, bytes: &[u8]) {
+        self.shared
+            .garbled_selects
+            .lock()
+            .expect("the garbled selects")
+            .insert(folder.to_string(), bytes.to_vec());
     }
 
     /// Leave the message `uid` out of every later FETCH of bodies that names
@@ -1083,6 +1098,15 @@ async fn serve(
             }
             "SELECT" | "EXAMINE" => {
                 let name = args.first().map(Token::text).unwrap_or_default();
+                let garbled = shared
+                    .garbled_selects
+                    .lock()
+                    .expect("the garbled selects")
+                    .remove(&name);
+                if let Some(bytes) = garbled {
+                    reply(&mut tls, &bytes).await?;
+                    return tls.get_ref().get_ref().shutdown(std::net::Shutdown::Both);
+                }
                 let mailbox = shared.mailbox(&name);
                 // RFC 3501 6.3.2: EXAMINE opens the folder read-only.
                 let read_only = command == "EXAMINE";
