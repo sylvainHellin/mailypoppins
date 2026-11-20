@@ -3838,3 +3838,11 @@ An additive bool member whose usual value is false can be sent only when true (s
 ## clippy --workspace lints only the test-support side of a cfg split in mp-tui (2026-11-20, PERSO-332)
 
 cargo clippy --workspace --all-targets turns the test-support feature on in mp-tui, so the non-test branch of a cfg(any(test, feature = "test-support")) split is only linted by cargo clippy -p mp-tui --lib.
+
+## A refused FETCH names no message, and giving up on one touches three walkers (2026-11-20, PERSO-333)
+
+- An IMAP `NO` to a multi-UID FETCH names no message: Gmail's "Some messages could not be FETCHed" and an outage's bare NO both leave the client to find out which, so a refusal is only pinned on a UID by a FETCH of that UID alone.
+- A UID given up on (#0074) must be counted as covered by the arrival coverage as well as left out of the body download; skipping it from the download alone makes it an undownloaded arrival again and re-locks the prune.
+- Anything that walks a mailbox by UID behind the arrival mark (the hook cursor) passes a given-up UID while it has no row, so it has to remember it as owed; holding the mark below it instead stalls that walker for good behind a message that may never come.
+- `MAX_INGEST_ATTEMPTS` counts passes, and the IDLE watcher runs a pass per arrival, so a failure counts only `FAILURE_SPACING_SECS` after the last counted one; without that, three passes in a minute give up on a message a passing refusal or a briefly locked store kept out.
+- `mp sync` is always `sync.quick`, whatever its `-n`; only the TUI's and the desktop app's full sync reach an uncapped pass, and a status-only folder's window caps even that.
