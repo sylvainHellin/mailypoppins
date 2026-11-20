@@ -5549,6 +5549,8 @@ mod tests {
         let inbox = sync_target(MailboxRole::Inbox, "Inbox");
 
         for pass in 1..=4 {
+            // Passes an hour apart, so each counts (PERSO-333 review).
+            crate::ingest::space_ingest_failures(&store);
             let emails: Vec<GraphFetched> = (0..3)
                 .map(|i| received(&format!("<poison{i}@x>"), "2026-08-06T10:00:00Z"))
                 .collect();
@@ -6986,6 +6988,8 @@ mod tests {
         let uid = crate::ingest::graph_uid("<poison@example.com>");
 
         for pass in 1..=2 {
+            // Passes an hour apart, so each counts (PERSO-333 review).
+            crate::ingest::space_ingest_failures(&store);
             let ingest_failed = crate::ingest::note_ingest_failure(
                 &store,
                 "acct",
@@ -7001,6 +7005,7 @@ mod tests {
             );
         }
 
+        crate::ingest::space_ingest_failures(&store);
         let ingest_failed = crate::ingest::note_ingest_failure(
             &store,
             "acct",
@@ -7032,6 +7037,7 @@ mod tests {
         assert!(crate::ingest::note_ingest_failure(
             &store, "acct", "inbox", "Inbox", uid, "locked"
         ));
+        crate::ingest::space_ingest_failures(&store);
         assert!(crate::ingest::note_ingest_failure(
             &store, "acct", "inbox", "Inbox", uid, "locked"
         ));
@@ -7280,6 +7286,8 @@ mod tests {
         // message is still owed the token does not advance, so the next pass
         // replays the same changes...
         for pass in 1..=2 {
+            // Passes an hour apart, so each counts (PERSO-333 review).
+            crate::ingest::space_ingest_failures(&store);
             let ingest_failed = crate::ingest::note_ingest_failure(
                 &store,
                 "acct",
@@ -7294,6 +7302,7 @@ mod tests {
             );
         }
         // ...and once the message is given up on, the chain moves again.
+        crate::ingest::space_ingest_failures(&store);
         let ingest_failed = crate::ingest::note_ingest_failure(
             &store,
             "acct",

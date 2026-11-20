@@ -719,6 +719,7 @@ mod tests {
     /// Give up on `uid` as the sync does, after its last allowed attempt.
     fn give_up(fx: &Fixture, uid: i64) {
         for _ in 0..ingest::MAX_INGEST_ATTEMPTS {
+            ingest::space_ingest_failures(&fx.store);
             ingest::record_ingest_failure(&fx.store, ACCOUNT, "inbox", uid, "refused");
         }
     }

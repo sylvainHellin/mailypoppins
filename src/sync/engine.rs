@@ -2495,6 +2495,8 @@ mod tests {
         backend.script("INBOX", (0..passes).map(|_| poisoned()).collect());
 
         for pass in 1..=passes {
+            // Passes an hour apart, so each counts (PERSO-333 review).
+            ingest::space_ingest_failures(&fx.store);
             let result = fx.run(&mut backend, &targets);
             assert!(
                 result.non_converging.is_empty(),
@@ -2747,6 +2749,8 @@ mod tests {
         );
 
         for pass in 1..ingest::MAX_INGEST_ATTEMPTS {
+            // Passes an hour apart, so each counts (PERSO-333 review).
+            ingest::space_ingest_failures(&fx.store);
             let result = fx.run(&mut backend, &targets);
             assert_eq!(
                 fx.cursor_mark("inbox"),
@@ -2758,6 +2762,7 @@ mod tests {
 
         // The last attempt is the give-up: the UID drops out of `unmet`, so it
         // neither lowers the mark nor reports the pass short from here on.
+        ingest::space_ingest_failures(&fx.store);
         let result = fx.run(&mut backend, &targets);
         assert_eq!(
             fx.cursor_mark("inbox"),
@@ -2792,6 +2797,8 @@ mod tests {
         );
 
         fx.run(&mut backend, &targets);
+        // Passes an hour apart, so each counts (PERSO-333 review).
+        ingest::space_ingest_failures(&fx.store);
         fx.run(&mut backend, &targets);
         assert_eq!(
             ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),
@@ -2805,6 +2812,7 @@ mod tests {
             1,
             "the reset wiped the count and this pass's own failure is the first again"
         );
+        ingest::space_ingest_failures(&fx.store);
         fx.run(&mut backend, &targets);
         assert_eq!(
             ingest::ingest_failure_attempts(&fx.store, "acct", "inbox", 105),

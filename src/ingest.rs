@@ -1812,6 +1812,13 @@ pub const GIVEN_UP_RETRY_SECS: i64 = 86_400;
 /// gate may open over it. The row stays, so the give-up is visible in the file
 /// and a later success still clears it.
 ///
+/// A failure counts only once [`FAILURE_SPACING_SECS`] has passed since the
+/// last one that did, `updated`; one sooner keeps the message owed and changes
+/// nothing but `last_error`. The spacing holds for both kinds of failure: a
+/// store that will not write is as likely to be locked for a few seconds as a
+/// server's refusal is to pass, and now that a give-up leaves the message
+/// alone for [`GIVEN_UP_RETRY_SECS`], a burst of passes must not reach it.
+///
 /// A store that cannot even record the failure answers `true`, the conservative
 /// side: an unrecorded attempt can never reach the bound, so the worst case is
 /// the pre-#0074 behaviour of retrying, never a gate opened over a hole.
@@ -1823,15 +1830,20 @@ pub fn record_ingest_failure(
     error: &str,
 ) -> bool {
     let conn = store.conn();
+    let now = crate::outbox::unix_now();
     let attempts: rusqlite::Result<i64> = conn.query_row(
         "INSERT INTO ingest_failures (account, mailbox, uid, attempts, last_error, updated)
          VALUES (?1, ?2, ?3, 1, ?4, ?5)
          ON CONFLICT (account, mailbox, uid) DO UPDATE SET
-            attempts = ingest_failures.attempts + 1,
+            attempts = CASE
+                WHEN ingest_failures.updated IS NULL OR ingest_failures.updated <= ?5 - ?6
+                THEN ingest_failures.attempts + 1 ELSE ingest_failures.attempts END,
             last_error = excluded.last_error,
-            updated = excluded.updated
+            updated = CASE
+                WHEN ingest_failures.updated IS NULL OR ingest_failures.updated <= ?5 - ?6
+                THEN excluded.updated ELSE ingest_failures.updated END
          RETURNING attempts",
-        rusqlite::params![account, mailbox, uid, error, crate::outbox::unix_now()],
+        rusqlite::params![account, mailbox, uid, error, now, FAILURE_SPACING_SECS],
         |row| row.get(0),
     );
     match attempts {
@@ -1937,6 +1949,20 @@ pub fn given_up_uids(
         warn!("Failed to read the messages given up on in '{mailbox}': {e}");
         std::collections::HashSet::new()
     })
+}
+
+/// Move every recorded failure back by [`FAILURE_SPACING_SECS`], as the time
+/// between two passes an hour apart would: what lets a test count its next
+/// failure (PERSO-333 review).
+#[cfg(test)]
+pub(crate) fn space_ingest_failures(store: &Store) {
+    store
+        .conn()
+        .execute(
+            "UPDATE ingest_failures SET updated = updated - ?1",
+            [FAILURE_SPACING_SECS],
+        )
+        .expect("age the recorded failures");
 }
 
 /// The UIDs of `mailbox` the sync has given up on and holds no row for,

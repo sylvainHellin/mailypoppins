@@ -2118,6 +2118,15 @@ mod wire {
         mailypoppins::ingest::ingest_failure_attempts(&wire.store(), ACCOUNT, "inbox", uid)
     }
 
+    /// Half an hour passes, as far as the refusals recorded are concerned:
+    /// what makes the next one count (`FAILURE_SPACING_SECS`).
+    fn half_an_hour_later(wire: &WireRoot) {
+        wire.store()
+            .conn()
+            .execute("UPDATE ingest_failures SET updated = updated - 1800", [])
+            .expect("age the refusals");
+    }
+
     /// The arrival mark the INBOX's cursor holds.
     fn mark(wire: &WireRoot) -> Option<i64> {
         mailypoppins::ingest::load_mailbox_cursor(&wire.store(), ACCOUNT, "inbox")
@@ -2171,6 +2180,7 @@ mod wire {
         let fifth = wire
             .imap
             .deliver_unannounced(INBOX, mail("fifth", "ed@example.org", "Fifth", "five"));
+        half_an_hour_later(&wire);
         wire.sync();
         assert!(
             wire.local("inbox").contains(&first),
@@ -2185,6 +2195,7 @@ mod wire {
         assert_eq!(attempts(&wire, 3), 2);
         assert_eq!(mark(&wire), Some(2));
 
+        half_an_hour_later(&wire);
         wire.sync();
         assert_eq!(attempts(&wire, 3), 3);
         assert_eq!(
@@ -2242,6 +2253,7 @@ mod wire {
     fn a_message_given_up_on_is_asked_for_again_a_day_later() {
         let wire = refusing_an_arrival();
         for _ in 0..3 {
+            half_an_hour_later(&wire);
             wire.sync();
         }
         assert_eq!(attempts(&wire, 3), 3);
@@ -2280,6 +2292,7 @@ mod wire {
     fn a_message_refused_twice_then_sent_is_ingested_and_its_count_cleared() {
         let wire = refusing_an_arrival();
         wire.sync();
+        half_an_hour_later(&wire);
         wire.sync();
         assert_eq!(attempts(&wire, 3), 2);
         assert_eq!(mark(&wire), Some(2), "still owed, so the mark waits");
@@ -2392,8 +2405,10 @@ mod wire {
         wait_for("the hook of UID 4", || fired(runs.path()).len() == 1);
         wire.imap
             .deliver_unannounced(INBOX, mail("fifth", "ed@example.org", "Fifth", "five"));
+        half_an_hour_later(&wire);
         wire.sync();
         wait_for("the hook of UID 5", || fired(runs.path()).len() == 2);
+        half_an_hour_later(&wire);
         wire.sync();
         assert_eq!(attempts(&wire, 3), 3, "UID 3 is given up on");
         wire.sync();
