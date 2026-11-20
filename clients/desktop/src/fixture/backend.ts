@@ -265,6 +265,8 @@ export const mock = {
   revision: 1000,
   /** The next sync's operation id counter. */
   nextSync: 1,
+  /** The syncs `sync_trigger` started and no test settled yet, oldest first, which `operation_cancel` cancels (PERSO-321). */
+  syncs: [] as { operation_id: string; account: string }[],
   /**
    * Hold the next answer of a command: it is computed at the call, from the
    * rows as they are then, and delivered once the promise settles, as a read
@@ -631,6 +633,7 @@ export function resetMock(): void {
   mock.holds = clone(fixtures.bootstrap.snapshot.holds);
   mock.revision = 1000;
   mock.nextSync = 1;
+  mock.syncs = [];
   mock.gates.clear();
   mock.terminal = new FakeBridge();
   mock.closeHandler = null;
@@ -706,6 +709,21 @@ export function formatRecipient(name: string, address: string): string {
   const atext = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~. \t]*$/.test(n);
   const quoted = atext ? n : `"${n.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   return `${quoted} <${address}>`;
+}
+
+/**
+ * The end of the oldest sync not settled yet: `succeeded` with no outcome to
+ * report, the way a pass that found nothing new ends, or, with `silent`, no
+ * end at all, as a pass that ended on its own while its finish is still on
+ * the way (PERSO-321).
+ */
+export function settleSync(opts: { silent?: boolean } = {}): string {
+  const run = mock.syncs.shift();
+  if (!run) throw new Error("no sync is waiting to settle");
+  if (!opts.silent) {
+    emitEnvelope("operation.finished", { operation_id: run.operation_id, state: "succeeded", result: { blocked: false, outcome: null } });
+  }
+  return run.operation_id;
 }
 
 /**
@@ -2631,7 +2649,7 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "operation_cancel": {
       // Every operation the mock keeps running until a test settles it.
       const id = String(args.operation_id);
-      const runs: { operation_id: string }[][] = [mock.signIns, mock.rebuilds, mock.rsvps, mock.invitesSent, mock.eventCreates, mock.eventChanges];
+      const runs: { operation_id: string }[][] = [mock.signIns, mock.rebuilds, mock.rsvps, mock.invitesSent, mock.eventCreates, mock.eventChanges, mock.syncs];
       const list = runs.find((l) => l.some((r) => r.operation_id === id));
       if (!list) return "already_settled";
       list.splice(
@@ -2708,9 +2726,12 @@ async function answer(cmd: string, args: Record<string, unknown> = {}): Promise<
       emitEnvelope("send.hold_cancelled", { ...hold, remaining_secs: 0 });
       return { cancelled: true, operation_id: id, revision: mock.revision };
     }
-    case "sync_trigger":
+    case "sync_trigger": {
       knownAccount(cmd, account);
-      return { operation_id: `fixture-op-${mock.nextSync++}` };
+      const operation_id = `fixture-op-${mock.nextSync++}`;
+      mock.syncs.push({ operation_id, account });
+      return { operation_id };
+    }
     case "send_draft":
       return sendDraft(account, String(args.id));
     case "send_approved": {
