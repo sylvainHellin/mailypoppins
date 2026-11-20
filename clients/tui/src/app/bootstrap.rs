@@ -567,6 +567,7 @@ mod tests {
             state: mp_protocol::state::SyncHealthState::Failed,
             reason: Some("IMAP login failed: no such user".to_string()),
             at: Some("2026-07-02T09:20:11+00:00".to_string()),
+            ..Default::default()
         };
         let app = App::from_bootstrap(config("fixture"), &snapshot);
 
@@ -608,6 +609,7 @@ mod tests {
                 state,
                 reason: reason.map(str::to_string),
                 at: Some("2026-07-02T09:20:11+00:00".to_string()),
+                ..Default::default()
             };
             snapshot
         };

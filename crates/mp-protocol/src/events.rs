@@ -113,6 +113,51 @@ pub struct SyncCompleted {
     /// The engine's error, rendered with `{:#}`, or `null` on a tick that ran.
     /// The one free-text field there is, and never a status line.
     pub error: Option<String>,
+    /// Every message of the account the sync has given up on for now and
+    /// holds no row for, as the store stands after this tick (PERSO-334), by
+    /// mailbox and UID: the whole list each time, not this tick's share, so a
+    /// client replaces what it holds. A failed tick (`error` set) carries
+    /// none and says nothing about it; the list stands as the last tick that
+    /// ran left it. Absent from a daemon that predates it, and when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub given_up: Vec<GivenUpMessage>,
+}
+
+/// One message the sync has given up on for now (#0074, PERSO-333): listed by
+/// the server, never stored, and asked for again later.
+///
+/// The mailbox and the UID are all mp knows of it: no row was ever written, so
+/// there is no sender or subject to show.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct GivenUpMessage {
+    /// The mailbox's store key, the selector segment and the sidebar's slug
+    /// (`inbox`, `archive`, a server folder name).
+    pub mailbox: String,
+    /// The UID the server lists it under, a Graph message's synthetic one on
+    /// a Graph account.
+    pub uid: u64,
+    /// Why it is not in the store.
+    pub kind: GivenUpKind,
+    /// The server's own words for a refusal, mp's reason for a message it
+    /// could not store.
+    pub reason: String,
+    /// When mp asks the server for it again, RFC 3339 with the daemon's
+    /// offset; `null` where every sync asks again (a Graph account).
+    #[serde(default)]
+    pub retry_at: Option<String>,
+}
+
+/// Why a message the sync gave up on is not in the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum GivenUpKind {
+    /// The server refused to send it when asked for it alone.
+    Refused,
+    /// The server sent it and mp could not store it.
+    Unwritable,
 }
 
 /// New mail in an account's Inbox that the daemon judged worth a system
@@ -477,5 +522,38 @@ mod tests {
             Some(crate::reminder::PRESENTER_GUI)
         );
         assert_eq!(arrived.presenter_connection, Some(7));
+    }
+
+    /// PERSO-334: a `sync.completed` from a daemon that predates `given_up`
+    /// decodes with an empty list, an empty list goes out as no key at all,
+    /// so an older client reads the payload it always read, and a list goes
+    /// out typed.
+    #[test]
+    fn given_up_is_an_additive_member_of_sync_completed_and_sync_health() {
+        let older = serde_json::json!({
+            "account": "work", "severity": "ok", "saved": 0, "skipped": 0,
+            "flags_updated": 0, "pruned": 0, "prunes_deferred": 0, "uid_rebound": 0,
+            "uidvalidity_resets": 0, "bodies_truncated": 0, "non_converging": [],
+            "failed_mutations": 0, "error": null,
+        });
+        let mut tick: SyncCompleted = serde_json::from_value(older.clone()).expect("decodes");
+        assert!(tick.given_up.is_empty());
+        assert_eq!(serde_json::to_value(&tick).unwrap(), older);
+
+        tick.given_up.push(GivenUpMessage {
+            mailbox: "inbox".to_string(),
+            uid: 3,
+            kind: GivenUpKind::Refused,
+            reason: "the server answered NO: Some messages could not be FETCHed".to_string(),
+            retry_at: Some("2026-11-21T10:00:00+01:00".to_string()),
+        });
+        let json = serde_json::to_value(&tick).unwrap();
+        assert_eq!(json["given_up"][0]["kind"], "refused");
+        assert_eq!(serde_json::from_value::<SyncCompleted>(json).unwrap(), tick);
+
+        let health: crate::state::SyncHealth =
+            serde_json::from_value(serde_json::json!({"state": "ok", "reason": null, "at": null}))
+                .expect("an older snapshot's health decodes");
+        assert!(health.given_up.is_empty());
     }
 }

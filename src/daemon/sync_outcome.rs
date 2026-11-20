@@ -75,6 +75,13 @@ pub fn from_sync_result(
         bodies_truncated: result.bodies_truncated as u64,
         non_converging,
         failed_mutations,
+        // A failed tick says nothing about the list: whatever it read is a
+        // pass that did not finish (PERSO-334).
+        given_up: if error.is_none() {
+            result.given_up.clone()
+        } else {
+            Vec::new()
+        },
         error,
     }
 }

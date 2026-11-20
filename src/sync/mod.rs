@@ -243,6 +243,10 @@ pub struct SyncResult {
     /// every tick. The log line carries the detail; this is what the status
     /// line and `mp sync` report so it cannot pass for a clean sync.
     pub non_converging: Vec<String>,
+    /// Every message of the account the sync has given up on for now and
+    /// holds no row for, read from the store once the pass is done
+    /// (PERSO-334): the list the sync status shows.
+    pub given_up: Vec<mp_protocol::events::GivenUpMessage>,
     /// Server names of the mailboxes whose download `limit` cut short after
     /// a window that landed whole, so the next pass takes the next window
     /// (PERSO-172). Graph only: it downloads by id, so a quick pass drains a

@@ -396,11 +396,7 @@ impl Snapshot {
                 json!({
                     "name": account.name,
                     "state": account.state.as_str(),
-                    "sync_health": {
-                        "state": health.state,
-                        "reason": health.reason,
-                        "at": health.at,
-                    },
+                    "sync_health": health,
                 })
             })
             .collect();

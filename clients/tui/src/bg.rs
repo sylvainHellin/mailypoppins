@@ -1926,6 +1926,7 @@ mod tests {
             uidvalidity_resets: 0,
             bodies_truncated: 0,
             non_converging: Vec::new(),
+            given_up: Vec::new(),
             failed_mutations: failed,
             error: None,
         }

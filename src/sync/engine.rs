@@ -448,6 +448,20 @@ pub async fn run_sync<B: SyncBackend>(
     run: &SyncRun<'_>,
     span: &mut TimingSpan,
 ) -> Result<SyncResult> {
+    let mut result = run_pass(backend, run, span).await?;
+    // The sync status's list (PERSO-334), from the store as the pass left it,
+    // whichever way it ended, so the pass that brings a given-up message in
+    // lists it no more.
+    result.given_up = ingest::given_up_report(run.store, run.account, crate::outbox::unix_now());
+    Ok(result)
+}
+
+/// [`run_sync`] without the sync status's list of given-up messages.
+async fn run_pass<B: SyncBackend>(
+    backend: &mut B,
+    run: &SyncRun<'_>,
+    span: &mut TimingSpan,
+) -> Result<SyncResult> {
     let SyncRun {
         store,
         blobs,

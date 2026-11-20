@@ -572,6 +572,7 @@ fn loud_outcome() -> SyncCompleted {
         non_converging: vec![fixture::INBOX.to_string()],
         failed_mutations: 1,
         error: None,
+        given_up: Vec::new(),
     }
 }
 
@@ -2299,7 +2300,10 @@ mod wire {
                 .contains(&(3, "<third@example.org>".to_string())),
             "{out}"
         );
-        assert_eq!(out, "✓ Synced: 1 new, 3 already present\n");
+        assert_eq!(
+            out, "✓ Synced: 1 new, 2 already present\n",
+            "UID 3 is in, and listed no more"
+        );
     }
 
     /// A message given up on is asked for again once a day has passed since

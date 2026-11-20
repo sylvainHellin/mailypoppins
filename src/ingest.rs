@@ -1886,6 +1886,66 @@ pub fn note_ingest_failure(
     false
 }
 
+/// What `ingest_failures.last_error` starts with for a body the server refused
+/// to send, the server's words after it: what tells a refusal from a message
+/// the store would not write in the sync status (PERSO-334).
+const REFUSED_PREFIX: &str = "the server refused to send it: ";
+
+/// Every message of `account` the sync has given up on for now and holds no
+/// row for, by mailbox and UID: the list the sync status shows (PERSO-334).
+///
+/// An IMAP UID's retry is [`GIVEN_UP_RETRY_SECS`] after its last attempt; a
+/// UID no IMAP server issues is a Graph message, which every sync asks for
+/// again, so it has none. A store that cannot answer lists nothing, and says
+/// so in the log: the status is a report, and the next tick reads it again.
+pub fn given_up_report(
+    store: &Store,
+    account: &str,
+    now: i64,
+) -> Vec<mp_protocol::events::GivenUpMessage> {
+    use mp_protocol::events::{GivenUpKind, GivenUpMessage};
+    let read = || -> rusqlite::Result<Vec<(String, i64, Option<String>, Option<i64>)>> {
+        let mut stmt = store.conn().prepare(
+            "SELECT f.mailbox, f.uid, f.last_error, f.updated FROM ingest_failures f
+             WHERE f.account = ?1 AND f.attempts >= ?2
+               AND NOT EXISTS (SELECT 1 FROM messages m
+                               WHERE m.account = f.account AND m.mailbox = f.mailbox
+                                 AND m.uid = f.uid)
+             ORDER BY f.mailbox, f.uid",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![account, MAX_INGEST_ATTEMPTS], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect()
+    };
+    let rows = read().unwrap_or_else(|e| {
+        warn!("Failed to read the messages given up on of '{account}': {e}");
+        Vec::new()
+    });
+    rows.into_iter()
+        .map(|(mailbox, uid, error, updated)| {
+            let error = error.unwrap_or_default();
+            let (kind, reason) = match error.strip_prefix(REFUSED_PREFIX) {
+                Some(words) => (GivenUpKind::Refused, words.to_string()),
+                None => (GivenUpKind::Unwritable, error.clone()),
+            };
+            let retry_at = u32::try_from(uid).ok().map(|_| {
+                let at = updated.unwrap_or(now) + GIVEN_UP_RETRY_SECS;
+                chrono::DateTime::from_timestamp(at, 0)
+                    .map(|utc| utc.with_timezone(&chrono::Local).to_rfc3339())
+                    .unwrap_or_default()
+            });
+            GivenUpMessage {
+                mailbox,
+                uid: u64::try_from(uid).unwrap_or_default(),
+                kind,
+                reason,
+                retry_at,
+            }
+        })
+        .collect()
+}
+
 /// Record that the server refused to send `uid` when asked for it alone, and
 /// answer whether it is still owed, as [`note_ingest_failure`] answers for a
 /// message the store would not write (PERSO-333): the same counter, spacing
@@ -1902,7 +1962,7 @@ pub fn note_fetch_refusal(
     words: &str,
     full_sync_asks: bool,
 ) -> bool {
-    let error = format!("the server refused to send it: {words}");
+    let error = format!("{REFUSED_PREFIX}{words}");
     if record_ingest_failure(store, account, mailbox, uid, &error) {
         return true;
     }

@@ -236,13 +236,14 @@ An account's `state` is one of `opening`, `ready` or `blocked`, and it reports t
 The two are deliberately different questions.
 An account is `opening` in a snapshot taken before its runtime came back and converges by event afterwards.
 For an `opening` account all counts are `0` and the draft list is empty, exactly as the TUI presents an account it has not opened yet; readiness arrives afterwards as an ordinary event.
-`sync_health` is an object `{state, reason, at}` whose `state` is `unknown`, `ok` or `failed`.
+`sync_health` is an object `{state, reason, at, given_up?}` whose `state` is `unknown`, `ok` or `failed`.
 It reflects the account's last completed pass at bootstrap time: `failed` when that pass carried an `error`, `ok` when it did not, and `unknown` until one has finished, which is what a fresh daemon reports.
 `reason` is that `error` verbatim for a failed pass and `null` otherwise; `at` is when the daemon noted the pass, RFC 3339 with the daemon's offset, and `null` while the state is `unknown`.
 Both keys are always present, so a client that starts after a failed pass marks the account with the error and the time as one that saw the `sync.completed` would.
 It is a projection of the daemon's `last_sync` ledger read at capture, not a reduction of a change: a completed pass takes a revision for its `sync.completed` event and moves nothing a revision describes.
 A client keeps the field current from `sync.completed` events after the bootstrap, not from a revisioned change to it.
 The ledger is read under the same gate a pass is noted under, so the two agree: a `sync.completed` at or below the captured revision is already in `sync_health`, and one above it arrives as the event.
+`given_up` (PERSO-334) is the list the last `sync.completed` that ran carried, kept across a failed one, and absent when empty or from a daemon that predates it; its entries are described under [`sync.completed`](#synccompleted).
 
 The ordering rule is the reason a bootstrap is one serialised operation.
 The daemon registers the connection as a subscriber **before** it captures the snapshot, so every change committed from the registration onwards is already queued; a register-last daemon loses exactly the changes that land between the capture and the start of queuing.
@@ -1683,8 +1684,13 @@ The one trace it leaves in a later bootstrap is the account's `sync_health` verd
 | `non_converging` | array of string | mailboxes that downloaded the same UIDs again, sorted and deduplicated |
 | `failed_mutations` | u64 | queued mutations that failed and were rolled back |
 | `error` | string or null | the engine's error rendered with `{:#}`, `null` on a tick that ran |
+| `given_up` | array, optional | every message of the account the sync has given up on for now and holds no row for, after this tick (PERSO-334) |
 
-Every key is present on every payload, so a client never branches on an absent one, and a tick that did not fail carries `"error": null` rather than an empty string.
+Every key but `given_up` is present on every payload, so a client never branches on an absent one, and a tick that did not fail carries `"error": null` rather than an empty string.
+`given_up` is additive: absent when empty and from a daemon that predates it, which a client reads as an empty list.
+It is the account's whole list as the store stands after the tick, not the tick's share, so a client replaces what it holds with it; a failed tick carries none and leaves the list as the last tick that ran left it.
+Each entry is `{mailbox, uid, kind, reason, retry_at}`: the mailbox's store key and the UID, which are all mp knows of a message it never stored; `kind` `refused` (the server would not send it when asked for it alone) or `unwritable` (mp could not store what it sent); `reason`, the server's words for a refusal and mp's for the other; and `retry_at`, when mp asks the server again, RFC 3339, or `null` where every sync asks again (a Graph account).
+It raises no severity: a message given up on stays listed on every tick until it arrives, and a warning on each would say nothing new.
 The payload does not list the mail the tick brought in: a client notifies from `mail.arrived`, published once the blocked senders and the hooks have judged it (PERSO-186, PERSO-306).
 
 The severity is decided in this order: an `error` that is not null is `error` whatever else the tick did; otherwise a non-empty `non_converging` **or** a `failed_mutations` above zero is `warning`; otherwise the tick is `ok`.

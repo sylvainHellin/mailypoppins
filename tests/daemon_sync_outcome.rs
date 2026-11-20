@@ -336,6 +336,7 @@ fn clean() -> SyncCompleted {
         non_converging: Vec::new(),
         failed_mutations: 0,
         error: None,
+        given_up: Vec::new(),
     }
 }
 

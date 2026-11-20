@@ -1500,6 +1500,7 @@ fn tick(saved: u64, skipped: u64, error: Option<&str>) -> Value {
         bodies_truncated: 0,
         non_converging: Vec::new(),
         failed_mutations: 0,
+        given_up: Vec::new(),
         error: error.map(str::to_string),
     };
     // Two readers: a `sync.completed` event's payload *is* the outcome, and an

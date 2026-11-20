@@ -381,8 +381,15 @@ pub struct CanonicalState {
 }
 
 /// One account's entry in the `last_sync` ledger: when its last tick finished,
-/// and that tick's error, `None` for a clean one.
-type LastSync = (chrono::DateTime<chrono::Local>, Option<String>);
+/// that tick's error, `None` for a clean one, and the messages the sync has
+/// given up on as the last tick that ran left them (PERSO-334), which a failed
+/// tick leaves alone.
+#[derive(Debug, Clone)]
+struct LastSync {
+    at: chrono::DateTime<chrono::Local>,
+    error: Option<String>,
+    given_up: Vec<mp_protocol::events::GivenUpMessage>,
+}
 
 #[derive(Debug)]
 struct Inner {
@@ -502,7 +509,7 @@ impl CanonicalState {
     ) -> Option<(chrono::DateTime<chrono::Local>, &'static str)> {
         lock(&self.last_sync)
             .get(account)
-            .map(|(at, error)| (*at, if error.is_some() { "failed" } else { "ok" }))
+            .map(|last| (last.at, if last.error.is_some() { "failed" } else { "ok" }))
     }
 
     /// The `(total, unread)` counts the state holds for one mailbox, `None`
@@ -560,9 +567,19 @@ impl CanonicalState {
                 .iter()
                 .any(|view| view.name == outcome.account);
             if configured {
-                lock(&self.last_sync).insert(
+                let mut ledger = lock(&self.last_sync);
+                let given_up = match (&outcome.error, ledger.get(&outcome.account)) {
+                    (None, _) => outcome.given_up.clone(),
+                    (Some(_), Some(last)) => last.given_up.clone(),
+                    (Some(_), None) => Vec::new(),
+                };
+                ledger.insert(
                     outcome.account.clone(),
-                    (chrono::Local::now(), outcome.error.clone()),
+                    LastSync {
+                        at: chrono::Local::now(),
+                        error: outcome.error.clone(),
+                        given_up,
+                    },
                 );
             }
         }
@@ -872,15 +889,16 @@ impl CanonicalState {
         // revisioned change to it.
         snapshot.sync_health = lock(&self.last_sync)
             .iter()
-            .map(|(account, (at, error))| {
+            .map(|(account, last)| {
                 let health = SyncHealth {
-                    state: if error.is_some() {
+                    state: if last.error.is_some() {
                         SyncHealthState::Failed
                     } else {
                         SyncHealthState::Ok
                     },
-                    reason: error.clone(),
-                    at: Some(at.to_rfc3339()),
+                    reason: last.error.clone(),
+                    at: Some(last.at.to_rfc3339()),
+                    given_up: last.given_up.clone(),
                 };
                 (account.clone(), health)
             })
@@ -1441,6 +1459,46 @@ mod tests {
             "and no bootstrap reports it: {}",
             json["sync_health"]
         );
+    }
+
+    /// PERSO-334: a bootstrap's `sync_health` lists the messages given up on
+    /// as the last tick that ran left them: a failed tick keeps the list, the
+    /// next tick that runs replaces it, and an empty list is no key at all.
+    #[test]
+    fn a_bootstrap_lists_the_messages_given_up_on_as_the_last_tick_that_ran_left_them() {
+        let state = state();
+        let given_up = vec![mp_protocol::events::GivenUpMessage {
+            mailbox: "inbox".to_string(),
+            uid: 3,
+            kind: mp_protocol::events::GivenUpKind::Refused,
+            reason: "the server answered NO: Some messages could not be FETCHed".to_string(),
+            retry_at: Some("2026-11-21T10:00:00+01:00".to_string()),
+        }];
+        let tick = |given_up: &[mp_protocol::events::GivenUpMessage], error: Option<&str>| {
+            Change::SyncCompleted(crate::daemon::sync_outcome::from_sync_result(
+                "alpha",
+                &crate::sync::SyncResult {
+                    given_up: given_up.to_vec(),
+                    ..crate::sync::SyncResult::default()
+                },
+                0,
+                error.map(str::to_string),
+            ))
+        };
+        let listed = |state: &CanonicalState| {
+            state.bootstrap(ConnectionId(1)).0.to_json()["accounts"][0]["sync_health"]
+                .get("given_up")
+                .cloned()
+        };
+
+        state.apply(tick(&given_up, None));
+        let json = listed(&state).expect("listed");
+        assert_eq!(json[0]["uid"], 3);
+        assert_eq!(json[0]["kind"], "refused");
+        state.apply(tick(&[], Some("connection refused")));
+        assert_eq!(listed(&state), Some(json), "a failed tick keeps the list");
+        state.apply(tick(&[], None));
+        assert_eq!(listed(&state), None, "the next tick that ran emptied it");
     }
 
     /// A sync that finishes after the reload removed its account, a first

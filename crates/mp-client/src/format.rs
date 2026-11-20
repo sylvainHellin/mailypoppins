@@ -162,7 +162,57 @@ pub fn sync_status_line(outcome: &SyncCompleted) -> String {
             outcome.failed_mutations
         ));
     }
+    if !outcome.given_up.is_empty() {
+        line.push_str(&format!(
+            "; {} (see the sidebar)",
+            given_up_headline(outcome.given_up.len())
+        ));
+    }
     line
+}
+
+/// What the sync status says of the messages the sync has given up on
+/// (PERSO-334): how many, and that the server still holds them.
+pub fn given_up_headline(count: usize) -> String {
+    if count == 1 {
+        "1 message could not be downloaded; it is still on the server, nothing is lost".to_string()
+    } else {
+        format!(
+            "{count} messages could not be downloaded; they are still on the server, \
+             nothing is lost"
+        )
+    }
+}
+
+/// One message the sync has given up on, as a sentence for a reader who never
+/// saw the code: which message (the mailbox and the UID are all mp knows of
+/// it), why it is not here, in the server's words for a refusal, and when mp
+/// tries again. `now` decides whether that retry is still to come.
+pub fn given_up_sentence(
+    message: &mp_protocol::events::GivenUpMessage,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    use mp_protocol::events::GivenUpKind;
+    let why = match message.kind {
+        GivenUpKind::Refused => format!("the server refuses to send it ({})", message.reason),
+        GivenUpKind::Unwritable => format!("mp could not store it ({})", message.reason),
+    };
+    let retry = match message
+        .retry_at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    {
+        Some(at) if at > now => format!(
+            "mp asks again after {}",
+            at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+        ),
+        Some(_) => "mp asks again on the next sync".to_string(),
+        None => "mp asks again on every sync".to_string(),
+    };
+    format!(
+        "{}, UID {} (mp knows it only by its mailbox and number): {why}; {retry}",
+        message.mailbox, message.uid
+    )
 }
 
 /// `mp sync`'s lines for a finished tick, one per state it reached, in the
@@ -244,6 +294,16 @@ fn cli_lines(outcome: &SyncCompleted, dry_run: bool) -> Vec<String> {
             "⚠ {at}{} mutation(s) failed and were rolled back (see the log)",
             outcome.failed_mutations
         ));
+    }
+    if !outcome.given_up.is_empty() {
+        lines.push(format!(
+            "⚠ {at}{}:",
+            given_up_headline(outcome.given_up.len())
+        ));
+        let now = chrono::Local::now();
+        for message in &outcome.given_up {
+            lines.push(format!("  · {}", given_up_sentence(message, now)));
+        }
     }
     lines
 }
@@ -617,6 +677,56 @@ pub fn config_refusal(error: &RpcError) -> Option<ConfigInvalid> {
         return None;
     }
     serde_json::from_value(error.data.clone()?).ok()
+}
+
+#[cfg(test)]
+mod given_up_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use mp_protocol::events::{GivenUpKind, GivenUpMessage};
+
+    fn message(kind: GivenUpKind, retry_at: Option<&str>) -> GivenUpMessage {
+        GivenUpMessage {
+            mailbox: "inbox".to_string(),
+            uid: 3,
+            kind,
+            reason: "the server answered NO: [UNAVAILABLE] try later".to_string(),
+            retry_at: retry_at.map(str::to_string),
+        }
+    }
+
+    /// PERSO-334: each message the sync gave up on reads as which message,
+    /// why in the server's or mp's words, and when mp asks again: a retry
+    /// still to come names its local minute, one already due the next sync,
+    /// and none (Graph) every sync.
+    #[test]
+    fn a_given_up_message_says_which_why_and_when_mp_asks_again() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 20, 9, 0, 0)
+            .unwrap();
+        let later = chrono::Local
+            .with_ymd_and_hms(2026, 11, 21, 10, 0, 0)
+            .unwrap()
+            .to_rfc3339();
+        assert_eq!(
+            given_up_sentence(&message(GivenUpKind::Refused, Some(&later)), now),
+            "inbox, UID 3 (mp knows it only by its mailbox and number): the server refuses to \
+             send it (the server answered NO: [UNAVAILABLE] try later); mp asks again after \
+             2026-11-21 10:00"
+        );
+        let earlier = (now - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(
+            given_up_sentence(&message(GivenUpKind::Refused, Some(&earlier)), now)
+                .ends_with("; mp asks again on the next sync")
+        );
+        let graph = given_up_sentence(&message(GivenUpKind::Unwritable, None), now);
+        assert!(graph.contains(": mp could not store it ("), "{graph}");
+        assert!(graph.ends_with("; mp asks again on every sync"), "{graph}");
+        assert_eq!(
+            given_up_headline(2),
+            "2 messages could not be downloaded; they are still on the server, nothing is lost"
+        );
+    }
 }
 
 #[cfg(test)]

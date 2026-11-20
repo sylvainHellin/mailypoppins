@@ -101,6 +101,12 @@ pub struct SyncHealth {
     /// while `state` is `unknown`.
     #[serde(default)]
     pub at: Option<String>,
+    /// The messages the sync has given up on for now, as the last tick that
+    /// ran left them, the list a `sync.completed` carries (PERSO-334).
+    /// Absent from a daemon that predates it, and when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub given_up: Vec<crate::events::GivenUpMessage>,
 }
 
 /// One account of the snapshot, in `config.toml`'s order.
@@ -575,6 +581,7 @@ mod tests {
                 state: SyncHealthState::Failed,
                 reason: Some("IMAP login failed: no such user".to_string()),
                 at: Some("2026-07-02T09:20:11+02:00".to_string()),
+                given_up: Vec::new(),
             }
         );
         assert_eq!(
@@ -601,6 +608,7 @@ mod tests {
                         state: SyncHealthState::Failed,
                         reason: Some("IMAP login failed".to_string()),
                         at: Some("2026-09-11T08:00:00+02:00".to_string()),
+                        given_up: Vec::new(),
                     },
                 }],
                 mailboxes: BTreeMap::from([(
