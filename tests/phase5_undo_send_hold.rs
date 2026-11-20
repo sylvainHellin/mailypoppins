@@ -29,15 +29,16 @@
 //!
 //! Three things, and a fourth row that proves them:
 //!
-//! - the fake transport ([`send_fixture::FAKE_TRANSPORT_ENV`]) is armed on the
-//!   daemon, so a send that happened would leave a line in a ledger file;
-//! - the outbox is seeded with nothing, so a durable row that appeared is the
+//! - the default account is on the fake SMTP and IMAP servers (PERSO-331), so
+//!   a send that happened would leave its message on the SMTP server;
+//! - the outbox rows are listed once the daemon's first drain has sent the
+//!   seeded ones it owes, so a durable row that appeared afterwards is the
 //!   send's;
 //! - `email.send_hold_secs` is set to a real, non-zero window and asserted to
 //!   be so, because a zero window is the config value that makes "mid-hold"
 //!   meaningless;
 //! - [`the_same_fixture_records_a_send_when_a_client_really_sends`] runs a send
-//!   through the same daemon and the same ledger and finds all three.
+//!   through the same daemon and the same servers and finds all three.
 //!
 //! # Not `#[ignore]`
 //!
@@ -59,6 +60,7 @@ use mp_client::{ClientInfo, ClientKind, Connection, Identity};
 
 use support::parity::{socket_path, DaemonFixture};
 use support::send_fixture as fixture;
+use support::wire_fixture::WireServers;
 
 /// The hold window this fixture configures, in seconds.
 ///
@@ -87,6 +89,17 @@ fn seed(root: &Path) {
         format!("[email]\nsend_hold_secs = {HOLD_SECS}\n\n{existing}"),
     )
     .expect("write config.toml");
+}
+
+/// Move the default account of the seeded `root` onto the fake SMTP and IMAP
+/// servers, start the daemon over it and wait for its first drain to send
+/// what the seeded outbox owed ([`WireServers::await_startup_drain`]).
+fn start_wired(root: &Path) -> (WireServers, DaemonFixture) {
+    let wire = WireServers::start();
+    wire.wire(root, fixture::ACCOUNT);
+    let daemon = DaemonFixture::start_with(root, None, &[]);
+    wire.await_startup_drain(root, fixture::ACCOUNT);
+    (wire, daemon)
 }
 
 /// The configured window, read back the way the TUI reads it.
@@ -205,12 +218,7 @@ fn quitting_the_last_client_mid_hold_leaves_the_draft_approved_and_sends_nothing
          before anything is held"
     );
 
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (wire, daemon) = start_wired(root);
 
     // The approve the TUI's `cA` / `x` does, over a real connection, followed
     // immediately by the client going away: that is the `q` the criterion is
@@ -270,17 +278,16 @@ fn quitting_the_last_client_mid_hold_leaves_the_draft_approved_and_sends_nothing
         "nothing was queued for delivery: the outbox holds a row the client's approve did not \
          find there\n{rows:?}"
     );
-    let events = fixture::transport_events(&log);
     assert!(
-        events.is_empty(),
-        "nothing reached the transport, and the fake one recorded {} event(s): {events:?}",
-        events.len()
+        wire.untouched_but_for(&fixture::SEEDED_MIDS),
+        "nothing reached the servers but the seeded rows: {:?}",
+        wire.submissions()
     );
 
     daemon.stop();
 }
 
-/// The same fixture, the same daemon and the same ledger, with a client that
+/// The same fixture, the same daemon and the same servers, with a client that
 /// really sends: the proof that the three negative assertions above can fail.
 #[test]
 fn the_same_fixture_records_a_send_when_a_client_really_sends() {
@@ -288,12 +295,7 @@ fn the_same_fixture_records_a_send_when_a_client_really_sends() {
     let root = tmp.path();
     seed(root);
 
-    let log = fixture::transport_log(root);
-    let daemon = DaemonFixture::start_with(
-        root,
-        None,
-        &[(fixture::FAKE_TRANSPORT_ENV, &fixture::fake_transport(&log))],
-    );
+    let (wire, daemon) = start_wired(root);
 
     let selector = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
     let out = daemon.mp_routed(&["send", &selector, "-y"]);
@@ -305,12 +307,12 @@ fn the_same_fixture_records_a_send_when_a_client_really_sends() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let events = fixture::transport_events(&log);
+    let sent = wire.submitted_message_ids(&fixture::SEEDED_MIDS);
     assert!(
-        !events.is_empty(),
-        "a real send leaves lines in the fake transport's ledger at {}, which is what makes the \
-         empty ledger above an assertion rather than a fact about the fixture",
-        log.display()
+        !sent.is_empty(),
+        "a real send leaves its message on the SMTP server, which is what makes the server \
+         holding nothing of ours above an assertion rather than a fact about the fixture: {:?}",
+        wire.submissions()
     );
     let retired = fixture::drafts_dir(root, fixture::ACCOUNT).join(fixture::APPROVED_FILE);
     assert!(
