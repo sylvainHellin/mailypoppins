@@ -20,6 +20,9 @@ pub(super) struct Alert {
 /// The persistent alert for the account the sidebar is showing, or `None`
 /// when there is nothing wrong with it.
 ///
+/// Below the two failures, the messages the sync has given up on (PERSO-334):
+/// a sync that fails says nothing new about them.
+///
 /// A login the server rejected (PERSO-296) comes first, with the sentence
 /// the daemon's health check and the desktop app use, because it names the
 /// way out; the failed sync it causes would only repeat the server's
@@ -45,13 +48,36 @@ pub(super) fn account_alert(app: &App) -> Option<Alert> {
             rows: LOGIN_REASON_ROWS,
         });
     }
-    let (headline, reason) = acct.sync_health.failure_lines()?;
+    if let Some((headline, reason)) = acct.sync_health.failure_lines() {
+        return Some(Alert {
+            headline,
+            reason,
+            rows: REASON_ROWS,
+        });
+    }
+    // The messages the sync has given up on (PERSO-334): the first named in
+    // the server's words, the count of the rest.
+    let first = acct.given_up.first()?;
+    let count = acct.given_up.len();
+    let headline = if count == 1 {
+        "\u{26a0} 1 message not downloaded".to_string()
+    } else {
+        format!("\u{26a0} {count} messages not downloaded")
+    };
+    let mut reason = mp_client::format::given_up_brief(first, chrono::Local::now());
+    if count > 1 {
+        reason.push_str(&format!(" And {} more.", count - 1));
+    }
     Some(Alert {
         headline,
         reason,
-        rows: REASON_ROWS,
+        rows: GIVEN_UP_ROWS,
     })
 }
+
+/// Rows a message given up on gets: four, for the mailbox and UID, the
+/// server's words and the retry in a sidebar about thirty columns wide.
+const GIVEN_UP_ROWS: usize = 4;
 
 /// Rows a sync failure's reason gets under the headline. Two, because the
 /// sidebar is about forty columns wide and the errors worth acting on are

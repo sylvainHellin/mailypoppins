@@ -184,6 +184,36 @@ pub fn given_up_headline(count: usize) -> String {
     }
 }
 
+/// The short form of [`given_up_sentence`] a narrow surface carries (the
+/// TUI's sidebar): the message, that the server still holds it, the reason,
+/// and when mp asks again.
+pub fn given_up_brief(
+    message: &mp_protocol::events::GivenUpMessage,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    use mp_protocol::events::GivenUpKind;
+    let why = match message.kind {
+        GivenUpKind::Refused => message.reason.clone(),
+        GivenUpKind::Unwritable => format!("mp could not store it: {}", message.reason),
+    };
+    let retry = match message
+        .retry_at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    {
+        Some(at) if at > now => format!(
+            "mp asks again {}",
+            at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+        ),
+        Some(_) => "mp asks again on the next sync".to_string(),
+        None => "mp asks again on every sync".to_string(),
+    };
+    format!(
+        "{} UID {}, still on the server: {why}. {retry}.",
+        message.mailbox, message.uid
+    )
+}
+
 /// One message the sync has given up on, as a sentence for a reader who never
 /// saw the code: which message (the mailbox and the UID are all mp knows of
 /// it), why it is not here, in the server's words for a refusal, and when mp
