@@ -2246,6 +2246,62 @@ mod wire {
         assert_eq!(attempts(&wire, 3), 0);
     }
 
+    /// When mp asks the server again for the given-up `uid`, as `mp sync`
+    /// prints it.
+    fn retry_minute(wire: &WireRoot, uid: i64) -> String {
+        let updated: i64 = wire
+            .store()
+            .conn()
+            .query_row(
+                "SELECT updated FROM ingest_failures WHERE uid = ?1",
+                [uid],
+                |row| row.get(0),
+            )
+            .expect("the refusal is recorded");
+        mailypoppins::ingest::local_minute(updated + mailypoppins::ingest::GIVEN_UP_RETRY_SECS)
+    }
+
+    /// PERSO-334: `mp sync` names a message given up on in the sync status,
+    /// by mailbox and UID, with the server's words and when mp asks again,
+    /// for as long as it is given up on; the pass that finally brings it in
+    /// lists it no more.
+    #[test]
+    fn mp_sync_lists_a_message_given_up_on_until_it_arrives() {
+        let wire = refusing_an_arrival();
+        let mut out = String::new();
+        for _ in 0..3 {
+            half_an_hour_later(&wire);
+            out = stdout(&wire.sync());
+        }
+        assert_eq!(attempts(&wire, 3), 3);
+        let listed = format!(
+            "⚠ 1 message could not be downloaded; it is still on the server, nothing is lost:\n  \
+             · inbox, UID 3 (mp knows it only by its mailbox and number): the server refuses \
+             to send it (the server answered NO: Some messages could not be FETCHed \
+             (Failure)); mp asks again after {}\n",
+            retry_minute(&wire, 3)
+        );
+        assert!(out.ends_with(&listed), "{out}");
+        let out = stdout(&wire.sync());
+        assert!(out.ends_with(&listed), "listed on every pass: {out}");
+
+        wire.imap.refuse_fetch_of(3, None);
+        wire.store()
+            .conn()
+            .execute(
+                "UPDATE ingest_failures SET updated = updated - ?1",
+                [86_400 + 60],
+            )
+            .expect("age the refusal");
+        let out = stdout(&wire.sync());
+        assert!(
+            wire.local("inbox")
+                .contains(&(3, "<third@example.org>".to_string())),
+            "{out}"
+        );
+        assert_eq!(out, "✓ Synced: 1 new, 3 already present\n");
+    }
+
     /// A message given up on is asked for again once a day has passed since
     /// it was last refused (a refusal can be transient), and ingested
     /// normally when the server then sends it, its count cleared.
