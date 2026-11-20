@@ -4899,4 +4899,99 @@ second\r\n\
         );
         assert_eq!(created_at(None, "2026-13-01-0900_a_b.md", mtime), mtime);
     }
+
+    /// The draft parser's refusal of `content`, as every client prints it.
+    fn parse_refusal(content: &str) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("kaputt.md");
+        fs::write(&path, content).unwrap();
+        let err = parse_email_draft(&path).expect_err("the frontmatter must be refused");
+        format!("{err:#}")
+    }
+
+    /// A key written twice is invalid YAML, and the refusal says which key
+    /// and where its second copy is, rather than the `invalid type: null`
+    /// the YAML engine's swallowed error used to leave behind.
+    #[test]
+    fn a_duplicated_frontmatter_key_is_refused_naming_the_key_and_its_line() {
+        let message = parse_refusal(concat!(
+            "---\n",
+            "to: robin@example.com\n",
+            "subject: Angebot\n",
+            "attachments:\n",
+            "  - /tmp/a.pdf\n",
+            "status: draft\n",
+            "attachments:\n",
+            "  - /tmp/b.pdf\n",
+            "---\n",
+            "\n",
+            "Body.\n",
+        ));
+        assert!(!message.contains("invalid type: null"), "{message}");
+        assert!(message.contains("\"attachments\""), "{message}");
+        assert!(message.contains("more than once"), "{message}");
+        assert!(
+            message.contains("line 7"),
+            "the line of the second copy, counted in the file: {message}"
+        );
+    }
+
+    /// A block that does not scan is refused with the YAML parser's own
+    /// reason, at a line counted in the file (here past a blank first line of
+    /// the block, which the frontmatter reader trims).
+    #[test]
+    fn a_frontmatter_that_does_not_scan_is_refused_with_the_parser_message() {
+        let message = parse_refusal(concat!(
+            "---\n",
+            "\n",
+            "to: robin@example.com\n",
+            "subject: \"Angebot ohne Ende\n",
+            "---\n",
+            "\n",
+            "Body.\n",
+        ));
+        assert!(!message.contains("invalid type: null"), "{message}");
+        assert_eq!(
+            message,
+            "Failed to parse frontmatter: line 4: while scanning a quoted scalar, found \
+             unexpected end of stream"
+        );
+    }
+
+    /// The refusal path costs a valid draft nothing: every field reads as it
+    /// always has.
+    #[test]
+    fn a_valid_frontmatter_parses_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fine.md");
+        fs::write(
+            &path,
+            concat!(
+                "---\n",
+                "id: \"d-fine\"\n",
+                "to: robin@example.com\n",
+                "cc: kim@example.com\n",
+                "subject: \"Re: Angebot\"\n",
+                "status: approved\n",
+                "attachments:\n",
+                "  - /tmp/a.pdf\n",
+                "---\n",
+                "\n",
+                "Body.\n",
+            ),
+        )
+        .unwrap();
+        let draft = parse_email_draft(&path).unwrap();
+        assert_eq!(draft.frontmatter.id.as_deref(), Some("d-fine"));
+        assert_eq!(draft.frontmatter.to.as_deref(), Some("robin@example.com"));
+        assert_eq!(draft.frontmatter.cc.as_deref(), Some("kim@example.com"));
+        assert_eq!(draft.frontmatter.bcc, None);
+        assert_eq!(draft.frontmatter.subject, "Re: Angebot");
+        assert_eq!(draft.frontmatter.status, EmailStatus::Approved);
+        assert_eq!(
+            draft.frontmatter.attachments,
+            Some(vec!["/tmp/a.pdf".to_string()])
+        );
+        assert_eq!(draft.body_markdown, "Body.");
+    }
 }

@@ -1377,6 +1377,47 @@ fn a_refusal_with_no_position_reports_a_null_line() {
 }
 
 #[test]
+fn a_duplicated_key_is_reported_by_name_at_the_line_of_its_second_copy() {
+    let root = TempDir::new().expect("tempdir");
+    let dir = drafts_dir_of(&root, "alpha");
+    fs::write(
+        dir.join("doppelt.md"),
+        "---\n\
+         id: d-twice\n\
+         to: robin@example.com\n\
+         attachments:\n  - /tmp/a.pdf\n\
+         subject: Angebot\n\
+         attachments:\n  - /tmp/b.pdf\n\
+         ---\n\
+         \n\
+         Body.\n",
+    )
+    .expect("write draft");
+
+    let mut watcher = DraftWatcher::new(roots(&root, "alpha"), unit_config());
+    let (events, _) = settle(&mut watcher, Instant::now(), unit_config().debounce);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let WatchEvent::DraftInvalid { diagnostics, .. } = &events[0] else {
+        panic!("a key written twice is invalid YAML, got {events:?}");
+    };
+    assert_eq!(
+        diagnostics[0].line,
+        Some(7),
+        "the line of the second `attachments:`, not of the mapping it sits in: \
+         {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0].message.contains("\"attachments\""),
+        "the message names the key: {diagnostics:?}"
+    );
+    assert!(
+        !diagnostics[0].message.contains("line 7"),
+        "the line is the diagnostic's own field, which every client prints beside the \
+         message: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn fixing_a_broken_draft_settles_into_a_change_on_the_same_resource() {
     let root = TempDir::new().expect("tempdir");
     let dir = drafts_dir_of(&root, "alpha");
