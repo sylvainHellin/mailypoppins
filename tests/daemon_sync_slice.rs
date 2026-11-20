@@ -2570,4 +2570,110 @@ mod wire {
             ]
         );
     }
+
+    /// Two hooks that fire for every message, one on the INBOX and one on
+    /// `Projects`, each leaving the JSON it was handed under `runs`.
+    fn hooks_on_inbox_and_projects(runs: &std::path::Path) -> String {
+        let exec = format!(
+            "exec = [\"/bin/sh\", \"-c\", \"f=$(mktemp -p '{}' .run.XXXXXX); cat > $f; \
+             mv $f $f.json\"]\n",
+            runs.display()
+        );
+        format!(
+            "\n[[accounts.hooks]]\nname = \"inbox\"\nmatch = {{ subject = \".\" }}\n{exec}\
+             \n[[accounts.hooks]]\nname = \"projects\"\nmailbox = \"Projects\"\n\
+             match = {{ subject = \".\" }}\n{exec}"
+        )
+    }
+
+    /// The `Projects` messages the store holds no row for and has failed on,
+    /// with their attempts.
+    fn projects_attempts(wire: &WireRoot, uid: i64) -> i64 {
+        mailypoppins::ingest::ingest_failure_attempts(&wire.store(), ACCOUNT, "Projects", uid)
+    }
+
+    /// PERSO-334 review: a hooked folder the server leaves out of one `LIST`
+    /// is only missing, so the message given up on in it keeps its failure
+    /// row and stays owed to the hook; the folder comes back, the message is
+    /// delivered, and its hook fires exactly once, as does every other's.
+    #[test]
+    fn a_message_given_up_on_in_a_folder_missing_for_a_while_still_fires_its_hook_once() {
+        let runs = tempfile::TempDir::new().expect("a runs directory");
+        let mut wire = WireRoot::new();
+        wire.write_config(&hooks_on_inbox_and_projects(runs.path()));
+        wire.imap.set_mail(
+            INBOX,
+            11,
+            vec![(1, mail("first", "ada@example.org", "First", "one"))],
+        );
+        let projects = |uids: &[u32]| -> Vec<(u32, Vec<u8>)> {
+            uids.iter()
+                .map(|&uid| {
+                    let id = format!("p{uid}");
+                    (uid, mail(&id, "gus@example.org", &format!("P{uid}"), "p"))
+                })
+                .collect()
+        };
+        wire.imap.set_mail("Projects", 21, projects(&[7]));
+        wire.start(&[]);
+        wire.sync();
+        wait_for("both hooks to arm", || {
+            std::fs::read_to_string(wire.account_dir().join("hooks-state.json"))
+                .is_ok_and(|state| state.contains("\"inbox\"") && state.contains("\"projects\""))
+        });
+
+        // UID 8 arrives and is refused until it is given up on; UID 9 after it
+        // moves the hook's cursor past it, so it is owed.
+        wire.imap.set_mail("Projects", 21, projects(&[7, 8]));
+        wire.imap.refuse_fetch_of(8, Some(NOT_FETCHED));
+        for _ in 0..3 {
+            half_an_hour_later(&wire);
+            wire.sync();
+        }
+        assert_eq!(projects_attempts(&wire, 8), 3);
+        wire.imap.set_mail("Projects", 21, projects(&[7, 8, 9]));
+        wire.sync();
+        wait_for("the hook of UID 9", || fired(runs.path()).len() == 1);
+
+        // One `LIST` without the folder (read on a runtime's first tick), and a
+        // scan of both hooks after it, which the INBOX hook's run proves.
+        wire.imap.remove_folder("Projects");
+        wire.stop();
+        wire.start(&[]);
+        wire.imap
+            .deliver_unannounced(INBOX, mail("second", "bob@example.org", "Second", "two"));
+        wire.sync();
+        wait_for("the INBOX hook's scan", || fired(runs.path()).len() == 2);
+
+        // The folder is back, the server sends UID 8, its retry is due.
+        wire.imap.set_mail("Projects", 21, projects(&[7, 8, 9]));
+        wire.imap.refuse_fetch_of(8, None);
+        wire.stop();
+        wire.start(&[]);
+        wire.store()
+            .conn()
+            .execute(
+                "UPDATE ingest_failures SET updated = updated - ?1",
+                [86_400 + 60],
+            )
+            .expect("age the refusal");
+        wire.sync();
+        assert!(
+            wire.local("Projects")
+                .contains(&(8, "<p8@example.org>".to_string())),
+            "{:?}",
+            wire.local("Projects")
+        );
+        wait_for("the hook of UID 8", || fired(runs.path()).len() == 3);
+        wire.sync();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(
+            fired(runs.path()),
+            vec![
+                "<p8@example.org>".to_string(),
+                "<p9@example.org>".to_string(),
+                "<second@example.org>".to_string(),
+            ]
+        );
+    }
 }
