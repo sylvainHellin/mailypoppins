@@ -429,7 +429,7 @@ The debounce trails, so a thousand-row selection, one call per row, is one drain
 A drainer that starts counts as one request, so it drains once a quiet period after the runtime comes up: rows queued with nobody left to ask (a restart inside the debounce, a mutation that found no runtime while a swap was replacing it) do not wait for the next mutation, and a clean account pays one `COUNT`.
 
 A drain and a tick's run hold the same runtime turn, so they never run side by side: a drain requested during a tick waits for it and then drains, which is what catches an op queued after the tick's tail drain read the queue.
-The turn does not cover every guarded pass in the process: the post-send outbox drain and a guarded `mp sync --mailbox`, `--dry-run` or `-n` other than 100 take the engine gate without it.
+The turn does not cover every guarded pass in the process: the post-send outbox drain and a guarded `mp sync --mailbox` or `--dry-run` take the engine gate without it.
 A mutation drain that finds ops owed and loses the gate to one of them drains nothing and loses nothing, and the drainer retries it after a backoff that starts at 1.5 s and doubles, six times at most (about a minute and a half in all); what is still queued after that waits for the next request or tick.
 A retired runtime refuses the drain, and a blocked one gets no drainer at all.
 
@@ -477,7 +477,7 @@ A tick is `run_tick_with_drains` (#0114) and nothing else: drain, sync, drain, w
 The body's error is carried on the outcome rather than propagated, because the tail has already run by the time anyone hears about it.
 A second tick arriving while one runs joins it and reports the running tick's outcome rather than starting a second engine pass.
 Each tick carries the account's `imap.body_fetch_deadline_secs` as its body budget, spent by all its mailboxes together (PERSO-300), with `0` meaning unbounded.
-A `mp sync` or `mp sync --full` of the whole account runs as a tick while the daemon is the account's engine, so it carries the budget too; the guarded pass (`mp sync --mailbox`, `mp sync --dry-run`, `mp sync -n` with a bound other than the tick's 100, an account's first sync) stays unbounded whatever the config says.
+A `mp sync`, `mp sync -n N` or `mp sync --full` of the whole account runs as a tick while the daemon is the account's engine, so it carries the budget too, `-n` bounding the tick it runs; the guarded pass (`mp sync --mailbox`, `mp sync --dry-run`, an account's first sync) stays unbounded whatever the config says.
 
 A runtime ticks when its watcher sees the mailbox move, when a client asks, and when its scheduler finds it has gone `sync_interval_secs` without a tick (see the scheduler above).
 The queues do not wait for a tick any more: the drainer above empties them after an interactive mutation without one.

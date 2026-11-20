@@ -4591,6 +4591,15 @@ fn say_settled_pass(
         }
         return Synced::Ran;
     }
+    // A pass that joined a sync already running with another bound
+    // (`mp sync -n` beside the scheduler's tick) has no outcome of its own:
+    // the line says its bound did not apply.
+    if let Some(joined) = result.get("joined").filter(|joined| joined.is_object()) {
+        say.out(&format!(
+            "\u{2139} {}",
+            mp_client::format::sync_joined_line(&account.name, joined["limit"].as_u64())
+        ));
+    }
     if let Ok(outcome) =
         serde_json::from_value::<mp_protocol::events::SyncCompleted>(result["outcome"].clone())
     {

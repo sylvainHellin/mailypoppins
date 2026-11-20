@@ -558,17 +558,22 @@ pub async fn tick_and_commit(
 /// A call that joined a tick already running and is cancelled while it waits
 /// stops that tick too (PERSO-321, see [`AccountRuntime::tick_until`]); it
 /// carries no outcome to commit either way, and the tick's own runner commits
-/// it, unless the tick was stopped ([`commit_outcome`]).
+/// it, unless the tick was stopped ([`commit_outcome`]). `limit` is the
+/// bound a quick tick this call runs takes (`mp sync -n`), `None` for the
+/// usual one.
 pub async fn tick_and_commit_until(
     runtimes: &RuntimeTable,
     canonical: &CanonicalState,
     account: &str,
     kind: TickKind,
+    limit: Option<usize>,
     stop: Stop,
     cancel: &CancelToken,
 ) -> Option<TickOutcome> {
     let runtime = runtimes.get(account)?;
-    let outcome = runtime.tick_until(kind, Some(stop), Some(cancel)).await;
+    let outcome = runtime
+        .tick_until(kind, limit, Some(stop), Some(cancel))
+        .await;
     if !cancel.is_cancelled() {
         commit_outcome(canonical, account, &outcome);
     } else {

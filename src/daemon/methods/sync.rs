@@ -62,9 +62,11 @@
 //! blocked pass is a *successful* operation whose result says nothing ran, and
 //! the client prints the skip line instead of a summary.
 //!
-//! The runtime's tick carries neither a mailbox subset, nor `--dry-run`, nor a
-//! quick bound other than its own [`QUICK_TICK_LIMIT`], so a request that names
-//! any of them takes the guarded path even when a runtime is live. The
+//! The runtime's tick carries neither a mailbox subset nor `--dry-run`, so a
+//! request that names either takes the guarded path even when a runtime is
+//! live. It carries a quick pass's `limit` (`mp sync -n`), for the tick that
+//! pass runs; a pass that joins a tick already running with another bound
+//! answers `joined: {limit}` beside its outcome, so the client can say so. The
 //! process-local engine gate gives that pass a turn beside the runtime instead
 //! of answering it `blocked` by this daemon's own lock; it is recorded in
 //! `docs/lessons-learned.md`, and a tick that can carry a subset is in
@@ -689,12 +691,13 @@ async fn run_pass_to_end(
     }
 
     // The runtime's tick when this daemon is the account's engine and the
-    // request is one the tick can carry; the guarded pass otherwise. The tick
-    // takes its kind's own bound, so a quick pass with another `limit`
-    // (`mp sync -n N`) is the guarded pass's too.
+    // request is one the tick can carry; the guarded pass otherwise. A quick
+    // pass's own `limit` (`mp sync -n N`) bounds the tick it runs, so it
+    // syncs the calendar, reconciles the drafts and notes a backlog as every
+    // tick does, and joins a tick already running instead of running beside
+    // it.
     let runtime_tick = request.mailbox.is_none()
         && !request.dry_run
-        && (request.kind == TickKind::Full || request.limit == QUICK_TICK_LIMIT)
         && runtimes.get(request.account.name.as_str()).is_some();
     if runtime_tick {
         let outcome = tick_and_commit_until(
@@ -702,6 +705,7 @@ async fn run_pass_to_end(
             &canonical,
             &request.account.name,
             request.kind,
+            Some(request.limit),
             stop,
             &handle.token,
         )
@@ -720,8 +724,14 @@ async fn run_pass_to_end(
         return match outcome {
             None => handle.succeed(blocked_result()),
             Some(outcome) => match outcome.error {
-                Some(error) => handle.fail(DomainError::internal(error)),
-                None => handle.succeed(ran_result(outcome.sync.as_ref())),
+                Some(ref error) => handle.fail(DomainError::internal(error.clone())),
+                None => {
+                    let mut result = ran_result(outcome.sync.as_ref());
+                    if let Some(joined) = joined_another_bound(&request, &outcome) {
+                        result["joined"] = joined;
+                    }
+                    handle.succeed(result)
+                }
             },
         };
     }
@@ -800,6 +810,7 @@ async fn calendar_pass(
             &canonical,
             name,
             request.kind,
+            None,
             stop,
             &handle.token,
         )
@@ -904,6 +915,21 @@ async fn publish_cancelled(request: &PassRequest, canonical: &Arc<CanonicalState
 /// The result of a pass another engine was already running (#0122).
 fn blocked_result() -> Value {
     json!({"blocked": true, "outcome": null})
+}
+
+/// What a pass that joined a tick already running with another bound than
+/// its own answers under `joined` (`{"limit": N}`, `null` for no bound), so
+/// the client can say its bound did not apply; `None` for a pass that ran
+/// its own tick, or joined one with its own bound.
+fn joined_another_bound(
+    request: &PassRequest,
+    outcome: &crate::daemon::runtime::account::TickOutcome,
+) -> Option<Value> {
+    let asked = pass_limit(request.kind, request.limit);
+    (outcome.joined && outcome.limit != asked).then(|| {
+        let limit = (outcome.limit != usize::MAX).then_some(outcome.limit);
+        json!({ "limit": limit })
+    })
 }
 
 /// The result of a pass that ran: its `sync.completed` payload and nothing
@@ -1102,10 +1128,7 @@ async fn body(
 /// on IMAP (PERSO-172); a capped pass also takes the delta path where a full
 /// one relists the folder ([`crate::graph`]'s `delta_verdict`).
 fn pass_limit(kind: TickKind, limit: usize) -> usize {
-    match kind {
-        TickKind::Quick => limit,
-        TickKind::Full => usize::MAX,
-    }
+    crate::daemon::runtime::account::tick_bound(kind, Some(limit))
 }
 
 /// The mailboxes one pass covers: the ones `--mailbox` named, or every folder

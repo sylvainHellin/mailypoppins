@@ -181,6 +181,11 @@ pub struct TickOutcome {
     /// The kind that actually ran, which for a joiner is the kind of the tick
     /// it attached to rather than the one it asked for.
     pub kind: TickKind,
+    /// The most new messages per mailbox the tick downloads: its kind's own
+    /// bound, or the one the call that ran it asked for
+    /// ([`AccountRuntime::tick_until`]); for a joiner, that of the tick it
+    /// attached to, which a caller compares with the bound it asked for.
+    pub limit: usize,
     /// The slots the tick entered, in order. Empty on a blocked tick.
     pub phases: Vec<Phase>,
     /// Whether this call attached to a tick already in flight.
@@ -255,6 +260,8 @@ pub struct TickContext {
     /// The kind of tick that is running. A drain outside a tick has no kind
     /// and says [`TickKind::Quick`], which no drain hook reads.
     pub kind: TickKind,
+    /// The most new messages per mailbox the body downloads ([`tick_bound`]).
+    pub limit: usize,
     /// Which of the five slots this call is.
     pub phase: Phase,
     /// The body-fetch budget the tick carries, `None` for unbounded.
@@ -858,7 +865,7 @@ impl AccountRuntime {
 
     /// Run one tick, or attach to the one already running.
     pub async fn tick(&self, kind: TickKind) -> TickOutcome {
-        self.tick_until(kind, None, None).await
+        self.tick_until(kind, None, None, None).await
     }
 
     /// [`AccountRuntime::tick`], whose body asks `stop` at every fetch chunk
@@ -872,17 +879,26 @@ impl AccountRuntime {
     /// at its next stop point, as for its runner's own stop, and the outcome
     /// every caller of the tick is handed says so ([`TickOutcome::stopped`]).
     /// A tick that is stopped ends with what it ingested before the stop.
+    ///
+    /// `limit` bounds a quick tick this call runs at that many new messages
+    /// per mailbox instead of [`QUICK_TICK_LIMIT`] (`mp sync -n`), and a full
+    /// one ignores it ([`tick_bound`]). A call that joins a tick already in
+    /// flight gets that tick's bound, which its outcome's `limit` reports:
+    /// one tick at a time is the rule, whatever bound each caller asked for.
     pub async fn tick_until(
         &self,
         kind: TickKind,
+        limit: Option<usize>,
         stop: Option<Stop>,
         cancel: Option<&CancelToken>,
     ) -> TickOutcome {
+        let limit = tick_bound(kind, limit);
         if self.readiness != Readiness::Ready {
             // No phase, no hook, no login: the holder is doing the work.
             debug!("[daemon] {} refused a {kind:?} tick: blocked", self.account);
             return TickOutcome {
                 kind,
+                limit,
                 phases: Vec::new(),
                 joined: false,
                 blocked: true,
@@ -907,6 +923,7 @@ impl AccountRuntime {
                 debug!("[daemon] {} refused a {kind:?} tick: retired", self.account);
                 return TickOutcome {
                     kind,
+                    limit,
                     phases: Vec::new(),
                     joined: false,
                     blocked: true,
@@ -977,6 +994,7 @@ impl AccountRuntime {
                         );
                         return TickOutcome {
                             kind,
+                            limit,
                             phases: Vec::new(),
                             joined: true,
                             blocked: false,
@@ -1022,6 +1040,7 @@ impl AccountRuntime {
                 debug!("[daemon] {} dropped a {kind:?} tick: retired", self.account);
                 TickOutcome {
                     kind,
+                    limit,
                     phases: Vec::new(),
                     joined: false,
                     blocked: true,
@@ -1040,6 +1059,7 @@ impl AccountRuntime {
                     // the calendar half below is the whole tick.
                     TickOutcome {
                         kind,
+                        limit,
                         phases: Vec::new(),
                         joined: false,
                         blocked: false,
@@ -1053,7 +1073,7 @@ impl AccountRuntime {
                         stopped: false,
                     }
                 } else {
-                    self.run_tick(kind, stop).await
+                    self.run_tick(kind, limit, stop).await
                 };
                 // A stopped tick owes no backlog: the user asked the syncing
                 // to stop, and the scheduler's next tick comes at its
@@ -1112,6 +1132,7 @@ impl AccountRuntime {
         let context = |phase: Phase| TickContext {
             account: self.account.clone(),
             kind: TickKind::Quick,
+            limit: QUICK_TICK_LIMIT,
             phase,
             body_deadline: self.body_deadline,
             stop: None,
@@ -1138,7 +1159,7 @@ impl AccountRuntime {
     }
 
     /// The tick itself: [`run_tick_with_drains`] over the installed hooks.
-    async fn run_tick(&self, kind: TickKind, stop: Option<Stop>) -> TickOutcome {
+    async fn run_tick(&self, kind: TickKind, limit: usize, stop: Option<Stop>) -> TickOutcome {
         self.report.reset();
         let phases = Mutex::new(Vec::with_capacity(5));
         let context = |phase: Phase| {
@@ -1146,6 +1167,7 @@ impl AccountRuntime {
             TickContext {
                 account: self.account.clone(),
                 kind,
+                limit,
                 phase,
                 body_deadline: self.body_deadline,
                 // The body's alone: the drains finish work the user already
@@ -1195,6 +1217,7 @@ impl AccountRuntime {
         );
         TickOutcome {
             kind,
+            limit,
             phases: entered,
             joined: false,
             blocked: false,
@@ -1537,10 +1560,12 @@ where
 }
 
 /// How many new messages per mailbox a tick of `kind` downloads, on either
-/// transport.
-fn tick_limit(kind: TickKind) -> usize {
+/// transport, when its caller asked for `asked`: the asked bound on a quick
+/// tick, else [`QUICK_TICK_LIMIT`]; no bound on a full one, whatever was
+/// asked.
+pub fn tick_bound(kind: TickKind, asked: Option<usize>) -> usize {
     match kind {
-        TickKind::Quick => QUICK_TICK_LIMIT,
+        TickKind::Quick => asked.unwrap_or(QUICK_TICK_LIMIT),
         TickKind::Full => usize::MAX,
     }
 }
@@ -1644,7 +1669,7 @@ async fn sync_once_imap(
             blobs: &blobs,
             account: &cfg.name,
             targets,
-            limit: tick_limit(ctx.kind),
+            limit: ctx.limit,
             dry_run: false,
             stop: ctx.stop.as_ref(),
             observations,
@@ -1697,7 +1722,7 @@ async fn sync_once_graph(
             &graph,
             &cfg.name,
             targets,
-            tick_limit(ctx.kind),
+            ctx.limit,
             false,
             ctx.stop.as_ref(),
             observations,
@@ -1810,6 +1835,7 @@ mod tests {
         TickContext {
             account: "evoqs".to_string(),
             kind,
+            limit: tick_bound(kind, None),
             phase: Phase::Body,
             body_deadline: Some(Duration::from_secs(30)),
             stop: None,
@@ -1967,8 +1993,11 @@ mod tests {
         let targets = crate::catalogue::Catalogue::resolve(&graph_config(), &[]).targets();
         let servers: Vec<&str> = targets.iter().map(|t| t.server_name.as_str()).collect();
         assert_eq!(servers, vec!["Inbox", "Sent Items", "Junk Email"]);
-        assert_eq!(tick_limit(TickKind::Quick), QUICK_TICK_LIMIT);
-        assert_eq!(tick_limit(TickKind::Full), usize::MAX);
+        assert_eq!(tick_bound(TickKind::Quick, None), QUICK_TICK_LIMIT);
+        assert_eq!(tick_bound(TickKind::Full, None), usize::MAX);
+        // `mp sync -n 2` bounds the quick tick it runs, and never a full one.
+        assert_eq!(tick_bound(TickKind::Quick, Some(2)), 2);
+        assert_eq!(tick_bound(TickKind::Full, Some(2)), usize::MAX);
     }
 
     /// The five slots, in the only order #0114 allows, and the status text is
@@ -2056,7 +2085,7 @@ mod tests {
             let cancel = cancel.clone();
             tokio::spawn(async move {
                 runtime
-                    .tick_until(TickKind::Full, None, Some(&cancel))
+                    .tick_until(TickKind::Full, None, None, Some(&cancel))
                     .await
             })
         };

@@ -269,6 +269,7 @@ mod tests {
     fn outcome(error: Option<&str>) -> TickOutcome {
         TickOutcome {
             kind: TickKind::Quick,
+            limit: crate::daemon::runtime::account::QUICK_TICK_LIMIT,
             phases: Vec::new(),
             joined: false,
             blocked: false,

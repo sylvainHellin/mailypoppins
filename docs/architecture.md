@@ -500,7 +500,7 @@ The store reads that seed each listing happen serially first, the listings overl
 A mailbox's body pass borrows a session at its first chunk, `SELECT`s the mailbox again and checks its UIDVALIDITY against the listing's, and returns the session when the pass ends (PERSO-300).
 Per mailbox, `UID SEARCH ALL` gives the UID list, the last `limit` UIDs are the window, pass 1 fetches `(UID FLAGS)` over the whole window and pass 2 downloads `BODY.PEEK[]` only for UIDs the store does not hold.
 The store answers "which UIDs do I hold" with one query, so there is no local scan and no dedup pass.
-Pass 2 is chunked (20 UIDs per `UID FETCH`, newest chunk first) and, on a tick of the account's runtime, bounded by `imap.body_fetch_deadline_secs` (default 30, clamped to [0, 600], 0 unbounded); the guarded pass (`mp sync --mailbox`, `mp sync --dry-run`, `mp sync -n` with a bound other than the tick's 100, an account's first sync) passes no budget (#0113).
+Pass 2 is chunked (20 UIDs per `UID FETCH`, newest chunk first) and, on a tick of the account's runtime, bounded by `imap.body_fetch_deadline_secs` (default 30, clamped to [0, 600], 0 unbounded); the guarded pass (`mp sync --mailbox`, `mp sync --dry-run`, an account's first sync) passes no budget (#0113).
 A `mp sync` of the whole account runs as a runtime tick while the daemon is the account's engine, so it carries the budget too.
 The budget is the pass's, all its mailboxes together, and not each mailbox's (PERSO-300): the mailboxes download one after another, and a budget per mailbox let a tick catching up six of them spend six while every other account waited behind it.
 Once it is spent, the mailbox in hand and every mailbox after it in the pass close short, and the next pass picks them up.
