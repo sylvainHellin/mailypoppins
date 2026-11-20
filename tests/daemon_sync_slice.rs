@@ -1112,6 +1112,92 @@ async fn a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox() {
     );
 }
 
+/// PERSO-321: a cancel of a pass that joined another client's tick stops
+/// that tick, and the client whose pass ran it is told its sync was
+/// cancelled rather than that it succeeded: the user asked for the sync of
+/// the account to stop, whoever started it.
+///
+/// The first connection's pass runs the tick and is held at its second
+/// mailbox boundary by the commit-hold hook; the second connection's pass
+/// joins it there and is cancelled; the hook is then released, and the tick
+/// stops at the boundary it was held at.
+#[tokio::test]
+async fn a_cancel_of_a_pass_that_joined_another_clients_tick_stops_it_for_both() {
+    let tmp = TempDir::new().expect("a temporary sync-slice root");
+    fixture::seed(tmp.path());
+    let hold = commit_hold_dir(tmp.path());
+    let hold_env = hold.to_string_lossy().into_owned();
+    let daemon = DaemonFixture::start_with(tmp.path(), None, &[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
+    let slice = Slice { daemon, tmp };
+    if !fixture::seed_secrets(slice.root()) {
+        return;
+    }
+    let mut runner = slice.connect().await;
+    let mut joiner = slice.connect().await;
+    call(&mut runner, "state.bootstrap", json!({})).await;
+    await_daemon_log(
+        slice.root(),
+        &format!("[drainer] published {}", fixture::SERVER_ACCOUNT),
+    )
+    .await;
+
+    let first = call(
+        &mut runner,
+        "sync.quick",
+        json!({"account": fixture::SERVER_ACCOUNT}),
+    )
+    .await;
+    let first = operation_id(&first);
+    await_commit_marker(&hold, "sync.quick", "held", SETTLE_DEADLINE).await;
+    let second = call(
+        &mut joiner,
+        "sync.quick",
+        json!({"account": fixture::SERVER_ACCOUNT}),
+    )
+    .await;
+    let second = operation_id(&second);
+    // Long enough for the second pass to reach the tick and join it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let cancelled = call(
+        &mut joiner,
+        "operation.cancel",
+        json!({"operation_id": second}),
+    )
+    .await;
+    assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
+    std::fs::write(hold.join("sync.quick.release"), b"").expect("release the hold");
+
+    let ran = settle(&mut runner, &first).await;
+    assert_eq!(
+        ran["state"], "cancelled",
+        "the pass whose tick a cancel stopped is a cancelled sync, not a finished one: {ran}"
+    );
+    assert_eq!(
+        ran["error"]["code"],
+        ErrorCode::OperationCancelled.code(),
+        "{ran}"
+    );
+    await_daemon_log(
+        slice.root(),
+        &format!("[sync] {}: stopped before", fixture::SERVER_ACCOUNT),
+    )
+    .await;
+    let bootstrap = call(&mut runner, "state.bootstrap", json!({})).await;
+    let gamma = bootstrap["snapshot"]["accounts"]
+        .as_array()
+        .and_then(|accounts| {
+            accounts
+                .iter()
+                .find(|account| account["name"] == fixture::SERVER_ACCOUNT)
+        })
+        .unwrap_or_else(|| panic!("the snapshot lists the server account: {bootstrap}"))
+        .clone();
+    assert_eq!(
+        gamma["sync_health"]["state"], "unknown",
+        "a stopped tick committed a sync.completed: {gamma}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. `mailbox.list_server`
 // ---------------------------------------------------------------------------
@@ -2177,6 +2263,95 @@ mod wire {
             wire.local("inbox").len(),
             2,
             "the mailbox ingested before the cancel stays"
+        );
+    }
+
+    /// PERSO-321: a cancel of a pass that joined the watcher's tick stops
+    /// that tick at its next batch, rather than leaving it to download the
+    /// rest while every client says the sync was cancelled; the next sync
+    /// goes on from there.
+    ///
+    /// Mail delivered to the idling INBOX wakes the daemon's watcher into a
+    /// quick tick, which downloads its 61 messages in batches of 20, each
+    /// slowed down; a `sync.quick` started once the first batch is in joins
+    /// that tick, and is cancelled. The commit-hold hook writes the joined
+    /// pass's `returned` marker once its worker, and so the tick it waited
+    /// for, is done.
+    #[test]
+    fn a_cancel_of_a_pass_that_joined_the_watchers_tick_stops_that_tick() {
+        use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
+        use mp_client::{ClientInfo, ClientKind, Connection, Identity};
+
+        let mut wire = WireRoot::new();
+        let held: Vec<(u32, Vec<u8>)> = (1..=60)
+            .map(|uid| {
+                let id = format!("old{uid}");
+                (uid, mail(&id, "ada@example.org", "Old", "one of many"))
+            })
+            .collect();
+        wire.imap.set_mail(INBOX, 11, held);
+        let hold = super::support::send_fixture::commit_hold_dir(wire.root());
+        let hold_env = hold.to_string_lossy().into_owned();
+        wire.start(&[(FAKE_COMMIT_HOLD_ENV, &hold_env)]);
+        wait_for("the daemon's watcher to idle", || wire.imap.idles() > 0);
+        wire.imap
+            .set_body_delay(std::time::Duration::from_millis(700));
+        wire.imap.deliver(
+            INBOX,
+            mail("new", "cy@example.org", "New", "wakes the watcher"),
+        );
+        wait_for("the watcher's tick to download its first batch", || {
+            wire.imap.body_fetches() >= 1
+        });
+
+        let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+        runtime.block_on(async {
+            let mut conn = Connection::connect(&super::support::parity::socket_path(wire.root()))
+                .await
+                .expect("connect");
+            conn.initialize(
+                ClientInfo {
+                    kind: ClientKind::Cli,
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                Identity {
+                    data_dir: wire.root().to_path_buf(),
+                    config_dir: wire.root().to_path_buf(),
+                },
+                &[],
+                &[],
+            )
+            .await
+            .expect("handshake");
+            let started = conn
+                .call("sync.quick", serde_json::json!({"account": ACCOUNT}))
+                .await
+                .expect("sync.quick starts");
+            let id = started["operation_id"].as_str().expect("an id").to_string();
+            // Long enough for the pass to reach the tick and join it.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let cancelled = conn
+                .call("operation.cancel", serde_json::json!({"operation_id": id}))
+                .await
+                .expect("the joined pass is cancelled");
+            assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
+        });
+        wait_for("the joined pass's worker to return", || {
+            hold.join("sync.quick.returned").exists()
+        });
+
+        let fetched = wire.imap.body_fetches();
+        let stored = wire.local("inbox").len();
+        assert!(
+            fetched < 4 && stored < 61,
+            "the tick ran on past the cancel: {fetched} batches downloaded, {stored} rows"
+        );
+        wire.imap.set_body_delay(std::time::Duration::ZERO);
+        assert_ok(&wire.mp(&["sync", "-n", "100"]), "the next mp sync");
+        assert_eq!(
+            wire.local("inbox").len(),
+            61,
+            "the next sync goes on from there"
         );
     }
 
