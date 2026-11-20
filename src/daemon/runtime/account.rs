@@ -469,6 +469,32 @@ enum Slot {
     Join(RunningTick),
 }
 
+/// The engine turn a tick's run holds, in a slot a body in slices empties
+/// and fills again between two slices ([`AccountRuntime::body_in_slices`]).
+type TurnSlot<'a> = Mutex<Option<tokio::sync::MutexGuard<'a, ()>>>;
+
+/// One outcome for every slice of a body in slices: what the slices did added
+/// up (saved, flags, prunes, rebinds, resets, arrivals), what the store held
+/// before them as the first one found it (`skipped`), and the state the last
+/// one left (what it cut short, deferred, gave up on or left backlogged).
+fn absorb(total: Option<SyncResult>, slice: SyncResult) -> SyncResult {
+    let Some(mut total) = total else {
+        return slice;
+    };
+    total.saved += slice.saved;
+    total.flags_updated += slice.flags_updated;
+    total.pruned += slice.pruned;
+    total.uid_rebound += slice.uid_rebound;
+    total.uidvalidity_resets += slice.uidvalidity_resets;
+    total.new_inbox_mail.extend(slice.new_inbox_mail);
+    total.prunes_deferred = slice.prunes_deferred;
+    total.bodies_truncated = slice.bodies_truncated;
+    total.non_converging = slice.non_converging;
+    total.given_up = slice.given_up;
+    total.backlogged = slice.backlogged;
+    total
+}
+
 /// What a [`AccountRuntime::tick`] call decided under the lock: its slot, or,
 /// for a full call that found a quick run in flight, to wait for that run's
 /// outcome before it decides again.
@@ -1097,7 +1123,8 @@ impl AccountRuntime {
 
         let outcome = {
             // A drain in flight holds the turn; this run waits for it (#0133).
-            let _turn = self.turn.lock().await;
+            // A body that runs in slices lets go of it between two of them.
+            let turn: TurnSlot<'_> = Mutex::new(Some(self.turn.lock().await));
             if *self.retired.borrow() {
                 // Retired while it waited: the engine lock is about to go.
                 debug!("[daemon] {} dropped a {kind:?} tick: retired", self.account);
@@ -1111,7 +1138,7 @@ impl AccountRuntime {
                     // the calendar half below is the whole tick.
                     self.ran_nothing(kind, limit)
                 } else {
-                    self.run_tick(kind, limit, stop).await
+                    self.run_tick(kind, limit, stop, &turn).await
                 };
                 // A stopped tick owes no backlog: the user asked the syncing
                 // to stop, and the scheduler's next tick comes at its
@@ -1196,9 +1223,20 @@ impl AccountRuntime {
         self
     }
 
-    /// The tick itself: [`run_tick_with_drains`] over the installed hooks.
-    async fn run_tick(&self, kind: TickKind, limit: usize, stop: Option<Stop>) -> TickOutcome {
+    /// The tick itself: [`run_tick_with_drains`] over the installed hooks,
+    /// with the body in slices when the tick's time says so
+    /// ([`AccountRuntime::body_in_slices`]).
+    async fn run_tick<'a>(
+        &'a self,
+        kind: TickKind,
+        limit: usize,
+        stop: Option<Stop>,
+        turn: &TurnSlot<'a>,
+    ) -> TickOutcome {
         self.report.reset();
+        // Graph spends no body budget, so it has no slice to cut.
+        let sliced = tick_time(kind, limit, self.body_deadline).until_complete
+            && self.config.auth_method != crate::config::AuthMethod::Graph;
         let phases = Mutex::new(Vec::with_capacity(5));
         let context = |phase: Phase| {
             lock(&phases).push(phase);
@@ -1228,8 +1266,15 @@ impl AccountRuntime {
             format!("{outbox}{mutations}")
         };
 
-        let (status, result) =
-            run_tick_with_drains(head, || (self.hooks.body)(context(Phase::Body)), tail).await;
+        let body = || async {
+            let ctx = context(Phase::Body);
+            if sliced {
+                self.body_in_slices(ctx, turn).await
+            } else {
+                (self.hooks.body)(ctx).await
+            }
+        };
+        let (status, result) = run_tick_with_drains(head, body, tail).await;
 
         let entered = lock(&phases).clone();
         let error = result.err().map(|e| format!("{e:#}"));
@@ -1268,6 +1313,64 @@ impl AccountRuntime {
             calendar: None,
             stopped: false,
         }
+    }
+
+    /// The body of a full tick or of a quick one above the usual bound, in
+    /// slices of the account's body budget: each slice is one pass of the
+    /// body hook under the budget, and the turn is let go between two of
+    /// them, so a send of a draft with a server copy, a drain or a drafts
+    /// reconcile waiting for it runs in between rather than behind the whole
+    /// download. Another slice follows while a mailbox stopped at the budget
+    /// and the slice saved something, the tick was not stopped and the
+    /// runtime not retired; the tick still ends with every body and reports
+    /// one outcome for all its slices ([`absorb`]).
+    ///
+    /// What the slices recorded in the report is taken out before the turn
+    /// is let go, since a drain in between resets it, and put back once the
+    /// last slice is over, for [`AccountRuntime::run_tick`] to read.
+    async fn body_in_slices<'a>(&'a self, ctx: TickContext, turn: &TurnSlot<'a>) -> Result<()> {
+        let mut total: Option<SyncResult> = None;
+        let mut failed_mutations = 0;
+        let mut slices = 0;
+        let ended = loop {
+            slices += 1;
+            let ran = (self.hooks.body)(ctx.clone()).await;
+            let slice = lock(&self.report.sync).take();
+            let again = ran.is_ok()
+                && slice
+                    .as_ref()
+                    .is_some_and(|slice| slice.bodies_truncated > 0 && slice.saved > 0);
+            if let Some(slice) = slice {
+                total = Some(absorb(total, slice));
+            }
+            if !again || crate::sync::stops_at(ctx.stop.as_ref(), crate::sync::StopPoint::Fetch) {
+                break ran;
+            }
+            failed_mutations += self.report.failed_mutations.swap(0, Ordering::SeqCst);
+            drop(lock(turn).take());
+            let guard = self.turn.lock().await;
+            *lock(turn) = Some(guard);
+            if *self.retired.borrow() {
+                break ran;
+            }
+            debug!(
+                "[daemon] {}: a {:?} tick runs its body slice {} after letting go of its turn",
+                self.account,
+                ctx.kind,
+                slices + 1
+            );
+        };
+        *lock(&self.report.sync) = total;
+        self.report
+            .failed_mutations
+            .fetch_add(failed_mutations, Ordering::SeqCst);
+        if slices > 1 {
+            info!(
+                "[daemon] {}: a {:?} tick downloaded its bodies in {slices} slices",
+                self.account, ctx.kind
+            );
+        }
+        ended
     }
 
     /// The calendar half of the tick (PERSO-200): after the mail pass and
@@ -1783,6 +1886,10 @@ struct TickTime {
     body_budget: Option<Duration>,
     /// The longest a Graph pass may run before it is cut off as an error.
     ceiling: Option<Duration>,
+    /// Whether the IMAP body runs in slices of `body_budget`, letting go of
+    /// the turn between two of them, until no mailbox stopped at it
+    /// ([`AccountRuntime::body_in_slices`]).
+    until_complete: bool,
 }
 
 /// What bounds a tick of `kind` whose bound is `limit` new messages per
@@ -1793,14 +1900,15 @@ struct TickTime {
 ///   client's quick sync, spends the deadline as its IMAP body budget, and a
 ///   Graph one is cut off at [`GRAPH_TICK_CEILING_FACTOR`] deadlines.
 /// - A quick tick with a larger bound (`mp sync -n 150`) is a user asking for
-///   that many messages: no budget and no ceiling, as the guarded pass it
-///   replaced had neither and as a full Graph tick has none.
-/// - A full tick has neither, which must let it finish however large the
-///   mailbox: it is the pass the user asks for to fetch every body, and the
-///   only one that can, since an IMAP quick window is the newest UIDs and the
-///   older bodies a cut full pass left would wait below it for the next full
-///   sync while the full pass reported itself done. It is stopped with its
-///   cancel instead (PERSO-321).
+///   that many messages, and a full tick is the pass the user asks for to
+///   fetch every body, and the only one that can, since an IMAP quick window
+///   is the newest UIDs and the older bodies a cut full pass left would wait
+///   below it for the next full sync while the full pass reported itself
+///   done. Both must finish however large the mailbox: no Graph ceiling, and
+///   an IMAP body in slices of the deadline until it is complete, so the
+///   turn a send or a drain waits for comes free between two slices rather
+///   than after the whole download. They are stopped with their cancel
+///   (PERSO-321).
 ///
 /// The HTTP client's own connect and idle-read timeouts still bound each
 /// Graph request when there is no ceiling.
@@ -1809,10 +1917,12 @@ fn tick_time(kind: TickKind, limit: usize, body_deadline: Option<Duration>) -> T
         TickKind::Quick if limit <= QUICK_TICK_LIMIT => TickTime {
             body_budget: body_deadline,
             ceiling: body_deadline.map(|deadline| deadline * GRAPH_TICK_CEILING_FACTOR),
+            until_complete: false,
         },
         TickKind::Quick | TickKind::Full => TickTime {
-            body_budget: None,
+            body_budget: body_deadline,
             ceiling: None,
+            until_complete: body_deadline.is_some(),
         },
     }
 }
@@ -1991,9 +2101,10 @@ mod tests {
         assert!(unbounded.is_ok(), "no ceiling, no cut-off");
     }
 
-    /// A quick tick with the usual bound spends the body-fetch deadline and
-    /// has a Graph ceiling; one with a larger bound (`mp sync -n 150`) has
-    /// neither, and nor has a full one.
+    /// A quick tick with the usual bound spends the body-fetch deadline once
+    /// and has a Graph ceiling; one with a larger bound (`mp sync -n 150`)
+    /// and a full one have no ceiling and spend the deadline slice after
+    /// slice until they are complete, and with no deadline nothing slices.
     #[test]
     fn a_ticks_time_follows_its_kind_and_its_bound() {
         let deadline = Some(Duration::from_secs(30));
@@ -2002,20 +2113,25 @@ mod tests {
             TickTime {
                 body_budget: deadline,
                 ceiling: Some(Duration::from_secs(600)),
+                until_complete: false,
             }
         );
+        let whole = TickTime {
+            body_budget: deadline,
+            ceiling: None,
+            until_complete: true,
+        };
         assert_eq!(
             tick_time(TickKind::Quick, QUICK_TICK_LIMIT + 1, deadline),
-            TickTime {
-                body_budget: None,
-                ceiling: None,
-            }
+            whole
         );
+        assert_eq!(tick_time(TickKind::Full, usize::MAX, deadline), whole);
         assert_eq!(
-            tick_time(TickKind::Full, usize::MAX, deadline),
+            tick_time(TickKind::Full, usize::MAX, None),
             TickTime {
                 body_budget: None,
                 ceiling: None,
+                until_complete: false,
             }
         );
     }

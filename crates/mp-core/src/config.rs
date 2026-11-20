@@ -896,11 +896,12 @@ pub struct ImapSettings {
     /// because a short pass already suspends the prune and resumes from its
     /// cursor.
     ///
-    /// It bounds every quick tick of the account's runtime, which is also how
-    /// the daemon runs a `mp sync` of the whole account while it is the
-    /// account's engine; a full tick (`sync.full`), a `mp sync --mailbox` or
-    /// `--dry-run`, and an account's first sync, pass no budget. `0` means
-    /// unbounded. Clamped to [0, 600] at load.
+    /// It bounds every tick of the account's runtime, which is also how the
+    /// daemon runs a `mp sync` of the whole account while it is the account's
+    /// engine; a full tick (`sync.full`) and a `mp sync -n` above the usual
+    /// bound spend it slice after slice until they are complete, and a
+    /// `mp sync --mailbox` or `--dry-run`, and an account's first sync, pass
+    /// no budget. `0` means unbounded. Clamped to [0, 600] at load.
     #[serde(default = "default_body_fetch_deadline_secs")]
     pub body_fetch_deadline_secs: u64,
     /// How long the daemon lets this account go without a sync before it runs
@@ -1272,9 +1273,9 @@ impl ImapConfig {
     ///
     /// `None` is also what the caller passes when the pass must not be cut
     /// short whatever the config says: the guarded pass of `mp sync --mailbox`,
-    /// `mp sync --dry-run` and an account's first sync, and a full tick of the
-    /// account's runtime. A `mp sync` of the whole account runs as a quick
-    /// tick of the account's runtime and carries the configured budget.
+    /// `mp sync --dry-run` and an account's first sync. A `mp sync` of the
+    /// whole account runs as a tick of the account's runtime and carries the
+    /// configured budget, a full one and a large `-n` once per slice.
     pub fn body_fetch_deadline(&self) -> Option<std::time::Duration> {
         (self.body_fetch_deadline_secs > 0)
             .then(|| std::time::Duration::from_secs(self.body_fetch_deadline_secs))

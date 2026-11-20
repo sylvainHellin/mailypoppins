@@ -212,10 +212,11 @@ default_from = "your.name@example.com"`} />
         is deleted and no flag delta is advanced on a sync that stopped early. Every quick
         sync of the whole account the daemon runs is bounded this way, whether the TUI, the
         schedule or <code>mp sync</code> started it. A full sync (<code>mp sync --full</code>,
-        the TUI's and the desktop app's <code>sS</code>), <code>mp sync --mailbox</code>,
-        <code>mp sync --dry-run</code> and <code>mp sync -n</code> with more than 100 ignore
-        the budget and download everything they owe; a full sync is stopped by cancelling it
-        instead.
+        the TUI's and the desktop app's <code>sS</code>) and <code>mp sync -n</code> with
+        more than 100 spend the budget again and again until everything they owe is in,
+        letting a send or another change through between two rounds;
+        <code>mp sync --mailbox</code> and <code>mp sync --dry-run</code> ignore the budget
+        and download everything they owe. A full sync is stopped by cancelling it.
       </p>
       <p>
         <code>sync_interval_secs</code> is how long the daemon lets the account go without
