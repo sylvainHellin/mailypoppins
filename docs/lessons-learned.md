@@ -3929,4 +3929,4 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 - A body run in turn-releasing slices has to ask its stop again once it has the turn back: a cancel that landed while a send held the turn otherwise cost a whole slice's login, listing and drafts reconcile.
 - `daemon.shutting_down` names no operation, so a follower that filters by operation id never saw it, and treated the cancel the stop caused like a user's.
 - A client's "the daemon is stopping" flag has to be read before the next bootstrap clears it: the TUI's `watermark` and the desktop's `bootstrapModel` reset it, and an orphaned sync is only found during that same bootstrap; with no daemon coming back there is no bootstrap, so the TUI says it at the disconnect.
-
+- A connection the daemon closed without announcing its stop is no proof the sync died: a reconnect to the same instance still delivers its end, so a client may only call a sync dropped once a snapshot from a new instance shows the old one is gone, which is when the desktop's Rust layer gives up on its pending operations too (PERSO-341).

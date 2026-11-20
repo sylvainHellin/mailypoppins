@@ -165,8 +165,9 @@ All notable changes to this project are documented in this file.
 - `mp config set-password` without `imap` or `smtp` prompts once and stores the password for both logins, a Graph account is pointed to `mp config oauth2-login`, health, the TUI and a held change or send name that command when the account uses one password, the desktop app offers Set password for both, and a set-password that fails on a full or read-only disk leaves the passwords as they were or says which one is stored (PERSO-297).
 
 ### Fixed
+- The TUI says "Sync of <account> was dropped: the daemon restarted", as the desktop does, when a sync it started died with a daemon that never announced its stop, once the next daemon connects; before, only a log line recorded it (PERSO-341).
 - A sync that joined one already running prints that sync's outcome in `mp sync`, the TUI and the desktop app, where it printed nothing and `mp sync` exited 0.
-- A sync cut short by `mp daemon stop` or `restart` says "Sync of <account> cut short by the daemon stopping" in every client as soon as the connection closes, whether it ended cancelled, failed or without its end, and `mp sync` (with `--full` too) exits 1.
+- A sync cut short by `mp daemon stop` or `restart` says "Sync of <account> cut short by the daemon stopping" in every client, at once in `mp sync` and the TUI and in the desktop when it reconnects to the next daemon, whether it ended cancelled, failed or without its end, and `mp sync` (with `--full` too) exits 1.
 - A full sync started while a quick sync is running waits for it and then runs a full sync of its own, instead of reporting the quick one as the full sync.
 - A full sync and `mp sync -n` above 100 download their IMAP bodies in slices of the account's body budget until every body is there, where a full sync could end "succeeded" with older bodies left for the next full sync; a send or a queued change goes out between two slices instead of waiting for the whole download.
 - `mp daemon install-service --check` warns when the installed service is not the file this version writes and names `--force`.
