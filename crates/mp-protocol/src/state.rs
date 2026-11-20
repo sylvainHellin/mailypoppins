@@ -105,7 +105,10 @@ pub struct SyncHealth {
     /// ran left them, the list a `sync.completed` carries (PERSO-334).
     /// Absent from a daemon that predates it, and when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(feature = "ts", ts(optional))]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::events::GivenUpMessage>>", optional)
+    )]
     pub given_up: Vec<crate::events::GivenUpMessage>,
 }
 

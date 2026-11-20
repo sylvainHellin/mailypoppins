@@ -83,6 +83,8 @@ export type { EventUpdateParams } from "./EventUpdateParams";
 export type { EventUpdateResult } from "./EventUpdateResult";
 export type { EventWriteResult } from "./EventWriteResult";
 export type { FolderPolicy } from "./FolderPolicy";
+export type { GivenUpKind } from "./GivenUpKind";
+export type { GivenUpMessage } from "./GivenUpMessage";
 export type { HealthCheck } from "./HealthCheck";
 export type { HoldListing } from "./HoldListing";
 export type { HoldStatus } from "./HoldStatus";

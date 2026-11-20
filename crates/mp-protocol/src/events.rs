@@ -120,7 +120,7 @@ pub struct SyncCompleted {
     /// none and says nothing about it; the list stands as the last tick that
     /// ran left it. Absent from a daemon that predates it, and when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(feature = "ts", ts(optional))]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<GivenUpMessage>>", optional))]
     pub given_up: Vec<GivenUpMessage>,
 }
 
