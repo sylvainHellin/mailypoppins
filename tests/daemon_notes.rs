@@ -867,9 +867,12 @@ async fn a_sent_drafts_note_follows_the_message_it_went_out_as() {
     let tmp = TempDir::new().unwrap();
     fixture::seed(tmp.path());
     support::parity::pin_font_size(tmp.path());
-    let hook = fixture::fake_transport(&fixture::transport_log(tmp.path()));
-    let daemon =
-        DaemonFixture::start_with(tmp.path(), None, &[(fixture::FAKE_TRANSPORT_ENV, &hook)]);
+    // The default account sends over the fake SMTP and IMAP servers
+    // (PERSO-331), once the daemon's first drain sent the seeded outbox.
+    let wire = support::wire_fixture::WireServers::start();
+    wire.wire(tmp.path(), fixture::ACCOUNT);
+    let daemon = DaemonFixture::start_with(tmp.path(), None, &[]);
+    wire.await_startup_drain(tmp.path(), fixture::ACCOUNT);
     let mut conn = connect(tmp.path()).await;
     let draft = fixture::selector(fixture::ACCOUNT, fixture::APPROVED);
     let set = note(
