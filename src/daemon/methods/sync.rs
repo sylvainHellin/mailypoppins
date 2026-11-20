@@ -62,12 +62,13 @@
 //! blocked pass is a *successful* operation whose result says nothing ran, and
 //! the client prints the skip line instead of a summary.
 //!
-//! The runtime's tick carries neither a mailbox subset nor `--dry-run`, so a
-//! request that names either takes the guarded path even when a runtime is
-//! live, and is then answered `blocked` by this daemon's own lock. Since P5-U8
-//! every account has a runtime, so `mp sync --mailbox` and `mp sync --dry-run`
-//! reach that corner on a daemon that is the account's engine; it is recorded
-//! in `docs/lessons-learned.md` and in PERSO-223.
+//! The runtime's tick carries neither a mailbox subset, nor `--dry-run`, nor a
+//! quick bound other than its own [`QUICK_TICK_LIMIT`], so a request that names
+//! any of them takes the guarded path even when a runtime is live. The
+//! process-local engine gate gives that pass a turn beside the runtime instead
+//! of answering it `blocked` by this daemon's own lock; it is recorded in
+//! `docs/lessons-learned.md`, and a tick that can carry a subset is in
+//! PERSO-223.
 //!
 //! ## A cancelled pass stops at the next boundary (PERSO-127)
 //!
@@ -688,9 +689,12 @@ async fn run_pass_to_end(
     }
 
     // The runtime's tick when this daemon is the account's engine and the
-    // request is one the tick can carry; the guarded pass otherwise.
+    // request is one the tick can carry; the guarded pass otherwise. The tick
+    // takes its kind's own bound, so a quick pass with another `limit`
+    // (`mp sync -n N`) is the guarded pass's too.
     let runtime_tick = request.mailbox.is_none()
         && !request.dry_run
+        && (request.kind == TickKind::Full || request.limit == QUICK_TICK_LIMIT)
         && runtimes.get(request.account.name.as_str()).is_some();
     if runtime_tick {
         let outcome = tick_and_commit_until(

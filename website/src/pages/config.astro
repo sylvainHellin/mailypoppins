@@ -211,8 +211,9 @@ default_from = "your.name@example.com"`} />
         several syncs instead of holding one open; newest mail is downloaded first. Nothing
         is deleted and no flag delta is advanced on a sync that stopped early. Every sync of
         the whole account the daemon runs is bounded this way, whether the TUI, the
-        schedule or <code>mp sync</code> started it; <code>mp sync --mailbox</code> and
-        <code>mp sync --dry-run</code> ignore the budget and download everything they owe.
+        schedule or <code>mp sync</code> started it; <code>mp sync --mailbox</code>,
+        <code>mp sync --dry-run</code> and <code>mp sync -n</code> with a bound other than
+        100 ignore the budget and download everything they owe.
       </p>
       <p>
         <code>sync_interval_secs</code> is how long the daemon lets the account go without

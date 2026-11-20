@@ -322,7 +322,8 @@ Sync mailboxes from the server into the local store
 Usage: mp sync [OPTIONS]
 
 Options:
-  -n, --limit <LIMIT>      Max messages per mailbox [default: 50]
+  -n, --limit <LIMIT>      Max messages per mailbox, newest first [default: 100]
+      --full               Sync every message of each mailbox instead of the newest --limit (the full sync of the TUI and the desktop app)
       --mailbox <MAILBOX>  Mailboxes to sync, by role, label or server name; any folder the server lists is accepted (default: every folder the account syncs)
       --dry-run            Show what would be ingested without writing anything
       --all-accounts       Sync every configured account (failures are named at the end; exit code 1 if any account failed)

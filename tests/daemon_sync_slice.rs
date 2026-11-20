@@ -51,9 +51,9 @@
 //!
 //! [`TickKind::Quick`] is the newest UIDs per mailbox; [`TickKind::Full`] is
 //! everything the mailbox lists. `mp sync -n N` is a quick pass with an
-//! explicit bound, so **`mp sync` always calls `sync.quick`** and passes `-n`
-//! as `limit`; `sync.full` has no CLI form and exists for the TUI's `sS` and
-//! the GUI (SYN-01), which is why it takes no `limit`.
+//! explicit bound, so `mp sync` calls `sync.quick` and passes `-n` as
+//! `limit`; `mp sync --full` calls `sync.full`, the pass of the TUI's `sS` and
+//! the GUI (SYN-01), which takes no `limit`, so `--full` refuses `-n`.
 //!
 //! ## `--all-accounts` is a loop in the client, and `all_accounts` is not on
 //! the wire

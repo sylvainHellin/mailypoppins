@@ -998,12 +998,12 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 ### SYN-02 Sync command options
 
 - Classification: CLI automation
-- Source anchor: `mp sync [-n] [--mailbox ...] [--dry-run] [--all-accounts]`, `src/main.rs`, `src/sync/engine.rs`
-- Daemon surface: `sync.quick` carrying `limit`, `mailbox` and `dry_run`
+- Source anchor: `mp sync [-n | --full] [--mailbox ...] [--dry-run] [--all-accounts]`, `src/main.rs`, `src/sync/engine.rs`
+- Daemon surface: `sync.quick` carrying `limit`, `mailbox` and `dry_run`; `sync.full` carrying `mailbox` and `dry_run` for `--full`
 - GUI location: not required (CLI automation)
 - Validation: `tests/cli_help_snapshot.rs`, `tests/daemon_sync_slice.rs`
 - Status: routed (P4-U10); GUI not started
-- Note: `--all-accounts` conflicts with `-A` by construction so a cron line cannot silently sync accounts it never named, and that conflict is a contract to preserve (`ANO-9`). `--all-accounts` itself is not on the wire: the client issues one operation per account in configuration order, because the per-account header, the failure denominator and the exit code are all rendering of a per-account result. `mp sync` always calls `sync.quick`, since `-n` has a default and the command has no unbounded form.
+- Note: `--all-accounts` conflicts with `-A` by construction so a cron line cannot silently sync accounts it never named, and that conflict is a contract to preserve (`ANO-9`). `--all-accounts` itself is not on the wire: the client issues one operation per account in configuration order, because the per-account header, the failure denominator and the exit code are all rendering of a per-account result. `mp sync` calls `sync.quick` with `-n`, whose default is the runtime tick's 100, and `mp sync --full` calls `sync.full`, the TUI's `sS` and the desktop app's full sync; `--full` refuses `-n`.
 
 ### SYN-03 Watch a mailbox through IMAP IDLE
 

@@ -327,9 +327,18 @@ enum Commands {
 
     /// Sync mailboxes from the server into the local store
     Sync {
-        /// Max messages per mailbox
-        #[arg(short = 'n', long, default_value = "50")]
+        /// Max messages per mailbox, newest first
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = mailypoppins::daemon::runtime::account::QUICK_TICK_LIMIT,
+            conflicts_with = "full"
+        )]
         limit: usize,
+        /// Sync every message of each mailbox instead of the newest --limit
+        /// (the full sync of the TUI and the desktop app)
+        #[arg(long)]
+        full: bool,
         /// Mailboxes to sync, by role, label or server name; any folder the
         /// server lists is accepted (default: every folder the account syncs)
         #[arg(long)]
@@ -4214,7 +4223,7 @@ fn refused_as(error: &mp_protocol::RpcError, state: &str) -> bool {
 /// (PERSO-321).
 async fn routed_sync(
     accounts: &[AccountConfig],
-    limit: usize,
+    limit: Option<usize>,
     mailbox: Option<&[String]>,
     dry_run: bool,
 ) -> Result<()> {
@@ -4260,7 +4269,9 @@ async fn routed_sync(
 
 /// What one `mp sync` asks of each account's pass.
 struct SyncRun<'a> {
-    limit: usize,
+    /// The quick pass's bound per mailbox, or `None` for a full pass
+    /// (`--full`).
+    limit: Option<usize>,
     mailbox: Option<&'a [String]>,
     dry_run: bool,
 }
@@ -4375,8 +4386,8 @@ async fn sync_accounts(
 
 /// One account's pass: the operation, its reports, and the lines they render to.
 ///
-/// `sync.quick` and not `sync.full`, always: `mp sync -n N` is a quick pass with
-/// an explicit bound, and `-n` has a default, so the CLI has no unbounded form.
+/// `sync.quick` with `-n` as its bound, which has a default, or `sync.full`
+/// for `--full`, the pass the TUI's `sS` and the desktop app's full sync start.
 ///
 /// A `^C` while the pass is followed cancels it ([`cancel_pass`]).
 async fn sync_one_routed(
@@ -4388,13 +4399,19 @@ async fn sync_one_routed(
 ) -> Synced {
     let mut params = serde_json::json!({
         "account": account.name,
-        "limit": run.limit,
         "dry_run": run.dry_run,
     });
+    let method = match run.limit {
+        Some(limit) => {
+            params["limit"] = serde_json::json!(limit);
+            "sync.quick"
+        }
+        None => "sync.full",
+    };
     if let Some(mailbox) = run.mailbox {
         params["mailbox"] = serde_json::json!(mailbox);
     }
-    let started = match daemon_try_call(connection, "sync.quick", params).await {
+    let started = match daemon_try_call(connection, method, params).await {
         Ok(started) => started,
         Err(error) if is_local_only(&error) => {
             say.out(&format!("- {}: local-only, skipped", account.name));
@@ -7651,6 +7668,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
 
         Some(Commands::Sync {
             limit,
+            full,
             mailbox,
             dry_run,
             all_accounts,
@@ -7671,6 +7689,7 @@ async fn run(matches: clap::ArgMatches, cli: Cli) -> Result<()> {
             if accounts.is_empty() || accounts.iter().all(|a| a.name.is_empty()) {
                 return Err(anyhow!("No account to sync (check `mp config show`)"));
             }
+            let limit = (!full).then_some(limit);
             routed_sync(&accounts, limit, mailbox.as_deref(), dry_run).await?;
         }
 
@@ -8527,7 +8546,7 @@ mod tests {
             let mut connection = mp_client::Connection::connect(path).await.expect("connect");
             let mut record = Record::default();
             let run = SyncRun {
-                limit: 50,
+                limit: Some(50),
                 mailbox: None,
                 dry_run: true,
             };
@@ -8609,7 +8628,7 @@ mod tests {
                 .expect("connect");
             let mut record = Record::default();
             let run = SyncRun {
-                limit: 50,
+                limit: Some(50),
                 mailbox: None,
                 dry_run: false,
             };
