@@ -457,9 +457,14 @@ async fn restore(
             });
         }
     }
-    Ok(Restored::Row(
-        Selector::for_message(&name, &row).to_string(),
-    ))
+    // Restored beside a twin, the copy is named with its UID (PERSO-340). The
+    // row is back either way, so a failed probe names it by the bare selector
+    // rather than reporting a restore that did happen as a failed fetch.
+    let selector = crate::selector::of_row(&store, &name, &row).unwrap_or_else(|e| {
+        log::warn!("[mutation] the copies of message {}: {e:#}", row.id);
+        Selector::for_message(&name, &row)
+    });
+    Ok(Restored::Row(selector.to_string()))
 }
 
 /// [`run_fetch`]'s work: the settled answer, or the refusal.
@@ -522,7 +527,8 @@ async fn fetch_into_store(
 /// the named mailbox: the question the overlay's guard asks is "can I already
 /// see this message", and a copy filed in Archive answers it as well as one in
 /// the Inbox. The answer names the mailbox the row is actually in, because
-/// that is the row the client is being handed.
+/// that is the row the client is being handed, and its selector is that
+/// copy's own, UID included when its mailbox holds a twin (PERSO-340).
 ///
 /// [`Store::open`] is right here and wrong in [`Stream::land`]: this method's
 /// gate is [`super::account::ready_account`], so the store existed and probed
@@ -537,12 +543,18 @@ fn held_row(account: &str, message_id: &str) -> Result<Option<Value>, RpcError> 
     let Some(row) = rows.first() else {
         return Ok(None);
     };
+    let selector = crate::selector::of_row(&store, account, row).map_err(|e| {
+        internal(format!(
+            "reading the copies of {account}:{}/{}: {e:#}",
+            row.mailbox, row.uid
+        ))
+    })?;
     Ok(Some(json!({
         "account": account,
         "mailbox": row.mailbox,
         "uid": row.uid,
         "row_id": row.id,
-        "selector": Selector::for_message(account, row).to_string(),
+        "selector": selector.to_string(),
         "already_present": true,
     })))
 }
@@ -659,11 +671,11 @@ fn ingest_into(
         &crate::ingest::RebindPolicy::Always,
         threading,
     )?;
-    let row = read::find_by_id(store, outcome.row_id)?;
-    let selector = row
-        .as_ref()
-        .map(|row| Selector::for_message(account, row).to_string())
-        .unwrap_or_default();
+    // The landed copy's own selector, UID included beside a twin (PERSO-340).
+    let selector = match read::find_by_id(store, outcome.row_id)? {
+        Some(row) => crate::selector::of_row(store, account, &row)?.to_string(),
+        None => String::new(),
+    };
     let change = read::mailbox_read_counts(store, account)
         .ok()
         .and_then(|counts| {

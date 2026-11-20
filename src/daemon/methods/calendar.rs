@@ -1768,7 +1768,9 @@ fn parse_response(word: &str) -> Result<(Rsvp, Response), RpcError> {
     }
 }
 
-/// The row `row_id` of `account`'s store and its canonical selector.
+/// The row `row_id` of `account`'s store and its own copy's selector, UID
+/// included when its mailbox holds a twin (PERSO-340), as a row addressed by
+/// selector is answered.
 fn row_by_id(
     store: &Store,
     name: &str,
@@ -1777,7 +1779,8 @@ fn row_by_id(
     let row = crate::store::read::find_by_id(store, row_id)
         .map_err(|e| server_error(name, &e))?
         .ok_or_else(|| invalid_params(format!("{name} holds no message with row id {row_id}")))?;
-    let canonical = crate::selector::Selector::for_message(name, &row);
+    let canonical =
+        crate::selector::of_row(store, name, &row).map_err(|e| server_error(name, &e))?;
     Ok((row, canonical))
 }
 

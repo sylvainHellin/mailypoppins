@@ -1524,8 +1524,7 @@ fn address_received(
             .ok_or_else(|| {
                 invalid_params(format!("{account} holds no message with row id {row_id}"))
             })?;
-        let selector = Selector::for_message(account, &row);
-        return Ok((row, selector));
+        return with_own_selector(store, account, row);
     }
     match (given("id"), given("selector")) {
         (true, true) => Err(invalid_params(
@@ -1547,8 +1546,7 @@ fn address_received(
             let row = crate::store::read::find_by_id(store, row)
                 .map_err(|e| internal(format!("reading message {row}: {e:#}")))?
                 .ok_or_else(missing)?;
-            let selector = Selector::for_message(account, &row);
-            Ok((row, selector))
+            with_own_selector(store, account, row)
         }
         (false, true) => {
             let selector = string_param(source, "selector")?;
@@ -1559,6 +1557,22 @@ fn address_received(
                 .map_err(|e| invalid_params(format!("{e:#}")))
         }
     }
+}
+
+/// `row` and the selector of its own copy, UID included when its mailbox
+/// holds a twin (PERSO-340), as a source addressed by selector is answered.
+fn with_own_selector(
+    store: &Store,
+    account: &str,
+    row: MessageRow,
+) -> Result<(MessageRow, Selector), RpcError> {
+    let selector = crate::selector::of_row(store, account, &row).map_err(|e| {
+        internal(format!(
+            "reading the copies of {account}:{}/{}: {e:#}",
+            row.mailbox, row.uid
+        ))
+    })?;
+    Ok((row, selector))
 }
 
 /// The row `key` names, from a scan of the account's drafts directory.
@@ -1699,7 +1713,8 @@ fn already_sent(account: &str, id: &str, sent: &EmailFrontmatter) -> RpcError {
 
 /// The selector of the account's sent copy of `message_id`, when its store
 /// holds one: the row the send ingested into `sent`, named as a listing names
-/// it. `None` with no store to ask, or none holding the copy yet.
+/// it, with its UID when the sent mailbox holds a second copy (PERSO-340).
+/// `None` with no store to ask, or none holding the copy yet.
 fn sent_copy(account: &str, message_id: &str) -> Option<Selector> {
     // Not while the daemon is still opening the store (PERSO-109), nor one
     // that is missing or does not open.
@@ -1714,9 +1729,15 @@ fn sent_copy(account: &str, message_id: &str) -> Option<Selector> {
     if rows.is_empty() {
         rows = crate::store::read::find_by_message_id(&store, account, key).ok()?;
     }
-    rows.iter()
-        .find(|row| crate::reconcile::is_sent_copy(&row.mailbox))
-        .map(|row| Selector::for_message(account, row))
+    let row = rows
+        .iter()
+        .find(|row| crate::reconcile::is_sent_copy(&row.mailbox))?;
+    Some(
+        crate::selector::of_row(&store, account, row).unwrap_or_else(|e| {
+            log::warn!("[draft] the copies of sent message {}: {e:#}", row.id);
+            Selector::for_message(account, row)
+        }),
+    )
 }
 
 /// `-32010`, carrying the diagnostics the watcher would have published: the

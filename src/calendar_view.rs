@@ -241,10 +241,18 @@ pub fn imip_events(store: &Store, account: &AccountConfig, viewer: Tz) -> Vec<So
         .iter()
         .filter_map(|row| {
             let event = imip_event(row, &account.name, viewer)?;
+            // The copy's own selector, UID included when its mailbox holds a
+            // twin (PERSO-340), so the mail opened from the event is this one.
             let selector = match crate::store::read::find_by_id(store, row.row_id) {
-                Ok(Some(message)) => {
-                    crate::selector::Selector::for_message(&account.name, &message).to_string()
-                }
+                Ok(Some(message)) => crate::selector::of_row(store, &account.name, &message)
+                    .unwrap_or_else(|err| {
+                        warn!(
+                            "[calendar] {}: the copies of the invitation row {}: {err:#}",
+                            account.name, row.row_id
+                        );
+                        crate::selector::Selector::for_message(&account.name, &message)
+                    })
+                    .to_string(),
                 Ok(None) => String::new(),
                 Err(err) => {
                     warn!(

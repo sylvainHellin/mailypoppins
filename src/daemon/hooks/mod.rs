@@ -485,13 +485,19 @@ fn payload(
 ) -> Value {
     let attachments = read::attachments_for(store, row.id).unwrap_or_default();
     let path = |name: &str| dir.map(|dir| dir.join(name).display().to_string());
+    // The copy's own selector, UID included when its mailbox holds a twin,
+    // so a command that acts on the message by it reaches this copy.
+    let selector = crate::selector::of_row(store, account, row).unwrap_or_else(|e| {
+        log::warn!("[hooks] the copies of message {}: {e:#}", row.id);
+        crate::selector::Selector::for_message(account, row)
+    });
     json!({
         "hook": hook.name,
         "account": account,
         "mailbox": row.mailbox,
         "uid": row.uid,
         "message_id": row.message_id,
-        "selector": crate::selector::Selector::for_message(account, row).to_string(),
+        "selector": selector.to_string(),
         "from": row.from,
         "authenticated_sender": verdict.authenticated_sender,
         "to": row.to,

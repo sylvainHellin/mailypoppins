@@ -612,6 +612,7 @@ Stdin carries the same JSON as `message.json`:
  "attachments": [{"name", "size", "inline", "path"}], "replay"}
 ```
 
+`selector` and `MP_HOOK_SELECTOR` name this copy of the message: when its mailbox holds a second copy of the Message-ID, they end in the copy's UID, `mp://<account>/<mailbox>/<key>/<uid>`, as `mp list-messages` prints it, so a command the hook runs on the selector acts on this copy.
 `attachments` lists the body's inline images too, `inline: true`, so a hook that wants only the files the sender attached skips those.
 
 The command's stdout and stderr are captured, so it must not leave a background child holding them open, or the daemon waits for that child until the timeout: redirect a detached child's output, or use a launcher that closes it.
