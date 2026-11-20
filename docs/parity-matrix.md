@@ -991,6 +991,9 @@ On top of that, and not repeated per entry: every daemon-served capability gains
 - Note: both are operations rather than commands, and both are durable: a sync a GUI started keeps running, and stays watchable, from the CLI window beside it. `sync.full` takes no `limit`, because a bounded full pass is a quick pass under another name.
   The TUI's two keys went through them in P5-U6, which also collapsed the client-side IMAP/Graph fork: the daemon's pass body loads whichever configuration the account has, so only the progress line still says which transport it is.
   P5-U8 took the wait off the worker thread: a pass is started by `commands::dispatch` and its finish arrives as an `operation.finished` event, so nothing polls `operation.status` any more.
+  A running pass is cancelled through `operation.cancel` in all three clients (PERSO-321): `^C` on `mp sync` (exit 130), `sx` in the TUI, and the desktop's running card "Full sync of <account>…" with Cancel, or its `sx`; each client cancels only the syncs it started, and says "Sync of <account> cancelled: what it already ingested stays, and the next sync goes on from there" (`mp_client::format::sync_cancelled_line`), or that the sync had already ended when the cancel came too late.
+  Validation of the cancel: `ctrl_c_on_mp_sync_cancels_the_pass_and_keeps_what_it_ingested` (`tests/daemon_sync_slice.rs`), `clients/tui/src/sync_cancel_tests.rs`, `clients/desktop/src/components/mutations/sync-cancel.test.tsx`; the daemon's stop at the next boundary is `a_sync_cancelled_while_it_runs_stops_before_the_next_mailbox`.
+  Quitting the TUI or closing the desktop window leaves a pass running, since both are durable.
 
 ### SYN-02 Sync command options
 

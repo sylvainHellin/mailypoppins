@@ -176,6 +176,17 @@ import AccordionItem from '../components/AccordionItem.astro';
           </p>
         </AccordionItem>
 
+        <AccordionItem question="Can I stop a sync that is running?">
+          <p>
+            Yes: press <code>Ctrl-C</code> during <code>mp sync</code>, <code>sx</code> in the TUI,
+            or Cancel on the sync's card in the desktop app (<code>sx</code> works there too). The
+            sync stops at its next mailbox or batch of messages; what it already ingested stays,
+            and the next sync goes on from there. Each client cancels only the syncs it started.
+            Quitting the TUI or closing the desktop window does not stop a sync: it finishes in the
+            background.
+          </p>
+        </AccordionItem>
+
         <AccordionItem question="What happens to messages deleted on the server?">
           <p>
             The same sync pass prunes them. Every sync enumerates the whole mailbox even when
