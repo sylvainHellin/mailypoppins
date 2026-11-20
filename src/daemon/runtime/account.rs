@@ -1656,8 +1656,8 @@ async fn sync_once_imap(
     // (docs/baselines/decisions/read-pool.md).
     let store = Store::open(crate::config::store_path(&cfg.name))?;
     let blobs = BlobStore::for_account(&cfg.name);
-    let mut backend =
-        crate::imap_client::ImapBackend::new(&imap_config).with_body_budget(ctx.body_deadline);
+    let budget = tick_time(ctx.kind, ctx.limit, ctx.body_deadline).body_budget;
+    let mut backend = crate::imap_client::ImapBackend::new(&imap_config).with_body_budget(budget);
     let mut span = crate::timing::TimingSpan::with_context("daemon_tick", cfg.name.clone());
 
     // Unguarded on purpose: this runtime is holding `store.lock` already. See
@@ -1693,7 +1693,7 @@ async fn sync_once_imap(
 ///
 /// The body-fetch deadline (#0113) is not spent as a body budget here, as the
 /// IMAP backend spends it; it sizes a quick pass's ceiling instead
-/// ([`graph_tick_ceiling`]): a quick pass that outlives it is cut off and
+/// ([`tick_time`]): a quick pass that outlives it is cut off and
 /// reported as the tick's error, so a request that never returns cannot hold
 /// the run slot and starve every later tick. Cutting it off is safe at any
 /// await point, because every store write in the pass (a batch's ingest, a
@@ -1717,7 +1717,7 @@ async fn sync_once_graph(
 ) -> Result<SyncResult> {
     let graph = crate::config::GraphConfig::load(cfg)?;
     within_ceiling(
-        graph_tick_ceiling(ctx.kind, ctx.body_deadline),
+        tick_time(ctx.kind, ctx.limit, ctx.body_deadline).ceiling,
         crate::graph::sync_mailboxes(
             &graph,
             &cfg.name,
@@ -1737,14 +1737,45 @@ async fn sync_once_graph(
 /// run slot.
 const GRAPH_TICK_CEILING_FACTOR: u32 = 20;
 
-/// The longest a Graph tick may run: `None` for a full tick, which must be
-/// allowed to finish however large the mailbox, and when the body-fetch
-/// deadline is configured unbounded (`0`). The HTTP client's own connect and
-/// idle-read timeouts still bound each request then.
-fn graph_tick_ceiling(kind: TickKind, body_deadline: Option<Duration>) -> Option<Duration> {
+/// What bounds a tick's time, decided in one place ([`tick_time`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TickTime {
+    /// What the IMAP backend may spend downloading bodies, all mailboxes
+    /// together, before it stops between two batches (#0113).
+    body_budget: Option<Duration>,
+    /// The longest a Graph pass may run before it is cut off as an error.
+    ceiling: Option<Duration>,
+}
+
+/// What bounds a tick of `kind` whose bound is `limit` new messages per
+/// mailbox, on an account whose body-fetch deadline is `body_deadline`
+/// (`None` when configured `0`, unbounded).
+///
+/// - A quick tick with the usual bound, the scheduler's, the watcher's and a
+///   client's quick sync, spends the deadline as its IMAP body budget, and a
+///   Graph one is cut off at [`GRAPH_TICK_CEILING_FACTOR`] deadlines.
+/// - A quick tick with a larger bound (`mp sync -n 150`) is a user asking for
+///   that many messages: no budget and no ceiling, as the guarded pass it
+///   replaced had neither and as a full Graph tick has none.
+/// - A full tick keeps the IMAP budget and has no Graph ceiling, which must
+///   let it finish however large the mailbox.
+///
+/// The HTTP client's own connect and idle-read timeouts still bound each
+/// Graph request when there is no ceiling.
+fn tick_time(kind: TickKind, limit: usize, body_deadline: Option<Duration>) -> TickTime {
     match kind {
-        TickKind::Quick => body_deadline.map(|deadline| deadline * GRAPH_TICK_CEILING_FACTOR),
-        TickKind::Full => None,
+        TickKind::Quick if limit <= QUICK_TICK_LIMIT => TickTime {
+            body_budget: body_deadline,
+            ceiling: body_deadline.map(|deadline| deadline * GRAPH_TICK_CEILING_FACTOR),
+        },
+        TickKind::Quick => TickTime {
+            body_budget: None,
+            ceiling: None,
+        },
+        TickKind::Full => TickTime {
+            body_budget: body_deadline,
+            ceiling: None,
+        },
     }
 }
 
@@ -1887,11 +1918,12 @@ mod tests {
     /// untouched, and an unbounded deadline imposes no ceiling.
     #[tokio::test]
     async fn a_graph_pass_that_hangs_is_cut_off_at_its_ceiling() {
+        let ceiling = |deadline| tick_time(TickKind::Quick, QUICK_TICK_LIMIT, deadline).ceiling;
         assert_eq!(
-            graph_tick_ceiling(TickKind::Quick, Some(Duration::from_secs(30))),
+            ceiling(Some(Duration::from_secs(30))),
             Some(Duration::from_secs(600))
         );
-        assert_eq!(graph_tick_ceiling(TickKind::Quick, None), None);
+        assert_eq!(ceiling(None), None);
 
         let started = tokio::time::Instant::now();
         let err = within_ceiling(
@@ -1921,16 +1953,46 @@ mod tests {
         assert!(unbounded.is_ok(), "no ceiling, no cut-off");
     }
 
+    /// A quick tick with the usual bound spends the body-fetch deadline and
+    /// has a Graph ceiling; one with a larger bound (`mp sync -n 150`) has
+    /// neither, and a full one keeps the IMAP budget and has no ceiling.
+    #[test]
+    fn a_ticks_time_follows_its_kind_and_its_bound() {
+        let deadline = Some(Duration::from_secs(30));
+        assert_eq!(
+            tick_time(TickKind::Quick, 2, deadline),
+            TickTime {
+                body_budget: deadline,
+                ceiling: Some(Duration::from_secs(600)),
+            }
+        );
+        assert_eq!(
+            tick_time(TickKind::Quick, QUICK_TICK_LIMIT + 1, deadline),
+            TickTime {
+                body_budget: None,
+                ceiling: None,
+            }
+        );
+        assert_eq!(
+            tick_time(TickKind::Full, usize::MAX, deadline),
+            TickTime {
+                body_budget: deadline,
+                ceiling: None,
+            }
+        );
+    }
+
     /// A full Graph tick has no ceiling: a pass that outlasts twenty
     /// body-fetch deadlines still runs to completion, because cutting it off
     /// would discard every message it downloaded before ingesting.
     #[tokio::test]
     async fn a_full_graph_pass_is_not_cut_off() {
         let deadline = Some(Duration::from_millis(1));
-        assert_eq!(graph_tick_ceiling(TickKind::Full, deadline), None);
-        assert_eq!(graph_tick_ceiling(TickKind::Full, None), None);
+        let ceiling = |deadline| tick_time(TickKind::Full, usize::MAX, deadline).ceiling;
+        assert_eq!(ceiling(deadline), None);
+        assert_eq!(ceiling(None), None);
 
-        let done = within_ceiling(graph_tick_ceiling(TickKind::Full, deadline), async {
+        let done = within_ceiling(ceiling(deadline), async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             Ok(SyncResult {
                 saved: 7,

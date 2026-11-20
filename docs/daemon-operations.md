@@ -477,7 +477,7 @@ A tick is `run_tick_with_drains` (#0114) and nothing else: drain, sync, drain, w
 The body's error is carried on the outcome rather than propagated, because the tail has already run by the time anyone hears about it.
 A second tick arriving while one runs joins it and reports the running tick's outcome rather than starting a second engine pass.
 Each tick carries the account's `imap.body_fetch_deadline_secs` as its body budget, spent by all its mailboxes together (PERSO-300), with `0` meaning unbounded.
-A `mp sync`, `mp sync -n N` or `mp sync --full` of the whole account runs as a tick while the daemon is the account's engine, so it carries the budget too, `-n` bounding the tick it runs; the guarded pass (`mp sync --mailbox`, `mp sync --dry-run`, an account's first sync) stays unbounded whatever the config says.
+A `mp sync`, `mp sync -n N` or `mp sync --full` of the whole account runs as a tick while the daemon is the account's engine, so it carries the budget too, `-n` bounding the tick it runs, and a summary line says when it stopped at the deadline; a `-n` above the usual 100 carries no budget, nor a Graph ceiling, since it asks for that many messages (`tick_time` in `src/daemon/runtime/account.rs`), and neither does the guarded pass (`mp sync --mailbox`, `mp sync --dry-run`, an account's first sync), whatever the config says.
 
 A runtime ticks when its watcher sees the mailbox move, when a client asks, and when its scheduler finds it has gone `sync_interval_secs` without a tick (see the scheduler above).
 The queues do not wait for a tick any more: the drainer above empties them after an interactive mutation without one.

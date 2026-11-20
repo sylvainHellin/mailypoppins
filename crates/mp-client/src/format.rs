@@ -394,9 +394,10 @@ fn cli_lines(outcome: &SyncCompleted, dry_run: bool) -> Vec<String> {
             outcome.prunes_deferred
         ));
     }
-    // No CLI original: `mp sync` is the explicit recovery path and carries no
-    // body-fetch deadline, so it never sees this. The TUI's wording at `ℹ`,
-    // because a deadline stop is progress (#0113).
+    // A whole-account `mp sync` runs as the account's tick and carries its
+    // body-fetch deadline, unless `-n` asks for more than the usual quick
+    // bound. The TUI's wording at `ℹ`, because a deadline stop is progress
+    // (#0113).
     if outcome.bodies_truncated > 0 {
         lines.push(format!(
             "ℹ {at}{} mailbox(es) stopped at the fetch deadline (resuming next sync)",
