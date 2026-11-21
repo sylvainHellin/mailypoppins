@@ -1615,6 +1615,8 @@ It is what converges a snapshot taken while an account was still `opening`, and 
 `draft.changed` replaces one draft whole, with a payload of `{account, id, path, to, subject, status, valid, ready, server?, version?}`, the snapshot row plus its account and the file's content version.
 `version` is the hex SHA-256 of the file's bytes as the watcher read them: a mirror state that moved (a push that landed) describes the draft again with the version the last event carried, so a client that shows the file reads it again only when `version` moved, and treats an event without one, from an older daemon, as a write (PERSO-272).
 `draft.invalid` replaces the *same* resource, `draft:<account>/<id>`, with a payload of `{account, id, path, diagnostics}`, where a diagnostic is `{line, message}` and `line` is 1-based, file-relative and `null` for a refusal by value rather than by syntax.
+A syntax `message` is the reason without its position: the YAML parser's own for a block that does not load, and `the key "<key>" is written more than once` for a key written twice, whose `line` is that of its second copy.
+A `-32010` refusal's `message` is its first diagnostic, as `line <n>: <message>` when the diagnostic has a line.
 It is a replacement rather than a lifecycle event because a broken draft is a fact about a resource that stays true until somebody fixes the file: it reduces into the snapshot, so a client that connects after the breakage still learns about it, and fixing the file replaces the row rather than adding a second one.
 All three are replacements because they are small and a client that re-queried them would learn nothing the payload did not already carry.
 

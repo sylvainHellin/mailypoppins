@@ -2184,6 +2184,137 @@ fn reject_non_string_id(data: &gray_matter::Pod) -> Result<()> {
     }
 }
 
+/// Why a frontmatter block is not YAML, which is what a draft refusal says
+/// instead of the `invalid type: null` the YAML engine leaves behind.
+///
+/// `gray_matter`'s YAML engine maps a block that does not load to
+/// [`gray_matter::Pod::Null`] and drops the error, so
+/// [`parse_email_draft_content`] reads the block again with the same parser
+/// (`yaml-rust2`) to recover it, only on that failure path. It travels inside
+/// the `anyhow` chain, where the daemon's diagnostic reads the line from it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontmatterSyntaxError {
+    /// The 1-based line the parser stopped at, counted in the file rather
+    /// than in the block; for a key written twice, the line of its second copy.
+    pub line: Option<u32>,
+    /// The reason, without the position.
+    pub reason: String,
+}
+
+impl std::fmt::Display for FrontmatterSyntaxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.line {
+            Some(line) => write!(f, "line {line}: {}", self.reason),
+            None => f.write_str(&self.reason),
+        }
+    }
+}
+
+impl std::error::Error for FrontmatterSyntaxError {}
+
+/// The first key a mapping of the block holds twice, with the block line of
+/// its second copy, which `yaml-rust2`'s own duplicate error does not give: it
+/// points at the end of the value instead, a line past a list.
+///
+/// Keys compare as the loader compares untagged ones, a plain scalar by the
+/// value it resolves to and a quoted one as a string, so `1:` and `01:`
+/// collide here as they do there. A tag is not read, which is why the scan
+/// runs only once the loader has refused the block over a duplicate.
+#[derive(Default)]
+struct DuplicateKeys {
+    /// One frame per open collection: a mapping's keys so far and whether its
+    /// next node is a key, or `None` for a sequence.
+    frames: Vec<Option<(std::collections::HashSet<yaml_rust2::Yaml>, bool)>>,
+    first: Option<(String, usize)>,
+}
+
+impl DuplicateKeys {
+    /// A node starts: in a mapping it is a key or a value, alternately.
+    fn node(&mut self, key: Option<(&str, yaml_rust2::scanner::TScalarStyle)>, line: usize) {
+        let Some(Some((keys, at_key))) = self.frames.last_mut() else {
+            return;
+        };
+        if *at_key {
+            if let Some((text, style)) = key {
+                let value = if style == yaml_rust2::scanner::TScalarStyle::Plain {
+                    yaml_rust2::Yaml::from_str(text)
+                } else {
+                    yaml_rust2::Yaml::String(text.to_string())
+                };
+                if !keys.insert(value) && self.first.is_none() {
+                    self.first = Some((text.to_string(), line));
+                }
+            }
+        }
+        *at_key = !*at_key;
+    }
+}
+
+impl yaml_rust2::parser::MarkedEventReceiver for DuplicateKeys {
+    fn on_event(&mut self, event: yaml_rust2::Event, mark: yaml_rust2::scanner::Marker) {
+        use yaml_rust2::Event;
+        match event {
+            Event::Scalar(text, style, ..) => self.node(Some((&text, style)), mark.line()),
+            Event::Alias(_) => self.node(None, mark.line()),
+            Event::SequenceStart(..) => {
+                self.node(None, mark.line());
+                self.frames.push(None);
+            }
+            Event::MappingStart(..) => {
+                self.node(None, mark.line());
+                self.frames.push(Some((Default::default(), true)));
+            }
+            Event::SequenceEnd | Event::MappingEnd => {
+                self.frames.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Why the frontmatter block `matter` of `content` does not load, or `None`
+/// when it does (a block that is YAML `null`, which the deserialiser then
+/// refuses on its own terms).
+///
+/// `matter` is the block as `gray_matter` hands it to its engine: trimmed, so
+/// its first line is the first non-blank line after the opening `---`.
+fn frontmatter_syntax_error(content: &str, matter: &str) -> Option<FrontmatterSyntaxError> {
+    // The loader `gray_matter`'s engine runs, so the reason is the one it
+    // refused the block over.
+    let error = yaml_rust2::YamlLoader::load_from_str(matter).err()?;
+    // Its duplicate error names whichever key the mapping holds last and
+    // points past the value, so a scan of its own finds the key and its line.
+    let duplicate = if error.info().ends_with("duplicated key in mapping") {
+        let mut duplicates = DuplicateKeys::default();
+        // The scan reaches the duplicate before the loader stopped on it, so
+        // its own outcome adds nothing.
+        let _ = yaml_rust2::parser::Parser::new_from_str(matter).load(&mut duplicates, false);
+        duplicates.first
+    } else {
+        None
+    };
+    let (reason, block_line) = match duplicate {
+        Some((key, line)) => (format!("the key {key:?} is written more than once"), line),
+        None => (error.info().to_string(), error.marker().line()),
+    };
+    let block: Vec<&str> = content
+        .lines()
+        .skip(1)
+        .take_while(|line| line.trim_end() != "---")
+        .collect();
+    let blank = block
+        .iter()
+        .take_while(|line| line.trim().is_empty())
+        .count();
+    // Past the opening delimiter and the blank lines the trim dropped; clamped
+    // to the closing delimiter, which an error at the end of the block names.
+    let line = (1 + blank + block_line).min(block.len() + 2);
+    Some(FrontmatterSyntaxError {
+        line: u32::try_from(line).ok(),
+        reason,
+    })
+}
+
 pub fn parse_email_draft(path: &Path) -> Result<EmailDraft> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
@@ -2199,6 +2330,11 @@ pub fn parse_email_draft_content(path: &Path, content: &str) -> Result<EmailDraf
     let data = parsed
         .data
         .ok_or_else(|| anyhow!("No frontmatter found in file"))?;
+    if matches!(data, gray_matter::Pod::Null) {
+        if let Some(error) = frontmatter_syntax_error(content, &parsed.matter) {
+            return Err(anyhow::Error::new(error).context("Failed to parse frontmatter"));
+        }
+    }
     reject_non_string_id(&data)?;
     let frontmatter: EmailFrontmatter =
         data.deserialize().context("Failed to parse frontmatter")?;

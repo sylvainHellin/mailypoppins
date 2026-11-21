@@ -321,8 +321,9 @@ use mailypoppins::daemon::state::FAKE_COMMIT_HOLD_ENV;
 use support::admin_fixture as fixture;
 use support::parity::{
     assert_byte_identical, daemon_is_listening, graph_without_smtp_warning, mp_command,
-    mp_no_daemon, oracle_command, pin_font_size, pin_theme, socket_path, todays_password_refusals,
-    without_retired_oauth2_mode, DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
+    mp_no_daemon, oracle_command, pin_font_size, pin_theme, socket_path,
+    todays_frontmatter_refusals, todays_password_refusals, without_retired_oauth2_mode,
+    DaemonFixture, EXIT_UNAVAILABLE, REQUIRE_ENV,
 };
 use support::send_fixture::{all_rows, await_commit_marker, commit_hold_dir};
 use support::wire_fixture::WireServers;
@@ -516,11 +517,13 @@ impl Slice {
 
     /// The pre-daemon binary over the same root: the definition of parity.
     fn oracle(&self, args: &[&str]) -> Output {
-        without_retired_oauth2_mode(todays_password_refusals(graph_without_smtp_warning(
-            oracle_command(self.root())
-                .args(args)
-                .output()
-                .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
+        todays_frontmatter_refusals(without_retired_oauth2_mode(todays_password_refusals(
+            graph_without_smtp_warning(
+                oracle_command(self.root())
+                    .args(args)
+                    .output()
+                    .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
+            ),
         )))
     }
 

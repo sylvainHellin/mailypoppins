@@ -60,6 +60,7 @@ use serde_json::json;
 
 use super::state::events::Event;
 use super::state::{CanonicalState, Change};
+use crate::draft::FrontmatterSyntaxError;
 
 /// The poll the TUI already runs, moved: one second.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(1000);
@@ -809,7 +810,7 @@ fn describe(root: &Root, path: &Path, mirror: Option<&MirrorState>) -> WatchEven
             // not parse.
             id: stem(path),
             path: path.to_path_buf(),
-            diagnostics: vec![diagnose(path, &e)],
+            diagnostics: vec![diagnose(&e)],
         },
     }
 }
@@ -822,18 +823,32 @@ fn describe(root: &Root, path: &Path, mirror: Option<&MirrorState>) -> WatchEven
 pub fn diagnostics_of(path: &Path) -> Vec<Diagnostic> {
     match crate::draft::parse_email_draft(path) {
         Ok(_) => Vec::new(),
-        Err(e) => vec![diagnose(path, &e)],
+        Err(e) => vec![diagnose(&e)],
     }
 }
 
 /// One diagnostic: the parser's reason on one line, and the line it is about.
-fn diagnose(path: &Path, error: &anyhow::Error) -> Diagnostic {
+///
+/// The line is the one the [`FrontmatterSyntaxError`] in the chain carries,
+/// which the message then leaves out, since a client prints it beside the
+/// message. A refusal by value rather than by syntax - a numeric `id:`
+/// (#0083) - has no syntax error behind it and correctly yields no line.
+fn diagnose(error: &anyhow::Error) -> Diagnostic {
+    let message = error
+        .chain()
+        .map(
+            |cause| match cause.downcast_ref::<FrontmatterSyntaxError>() {
+                Some(syntax) => syntax.reason.clone(),
+                None => cause.to_string(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(": ");
     Diagnostic {
-        line: frontmatter_line(path),
-        message: format!("{error:#}")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
+        line: error
+            .downcast_ref::<FrontmatterSyntaxError>()
+            .and_then(|syntax| syntax.line),
+        message: message.split_whitespace().collect::<Vec<_>>().join(" "),
     }
 }
 
@@ -863,30 +878,6 @@ fn stem(path: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned()
-}
-
-/// The 1-based, file-relative line a refusal points at, or `None`.
-///
-/// A second pass with `serde_yaml` over the frontmatter block alone, because
-/// `gray_matter`'s YAML engine reports a scan failure as a null document and
-/// keeps no position. A refusal by value rather than by syntax - a numeric
-/// `id:` (#0083) - parses here and correctly yields no line.
-fn frontmatter_line(path: &Path) -> Option<u32> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    if lines.next()?.trim_end() != "---" {
-        return None;
-    }
-    let block: String = lines
-        .take_while(|line| line.trim_end() != "---")
-        .map(|line| format!("{line}\n"))
-        .collect();
-    let error = serde_yaml::from_str::<serde_yaml::Value>(&block).err()?;
-    // The block starts on the file's second line, so the offset is the one
-    // opening delimiter; clamped, because a scanner that stopped at the end of
-    // the block may point one line past it.
-    let line = error.location()?.line() as u32 + 1;
-    Some(line.min(text.lines().count().max(1) as u32))
 }
 
 // ---------------------------------------------------------------------------

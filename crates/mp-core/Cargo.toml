@@ -68,6 +68,10 @@ mp-protocol = { path = "../mp-protocol" }
 nucleo-matcher = "0.3"
 # `draft`: the YAML frontmatter parser and the drafts-directory walk.
 gray_matter = "0.2"
+# `draft`: the parser behind `gray_matter`'s YAML engine, which turns a block
+# that does not load into a null document; reading the block again with it is
+# how a refusal names the reason, the key and the line.
+yaml-rust2 = "0.8"
 walkdir = "2"
 # `draft::validate_draft` only parses an address with `message::Mailbox`, so
 # the transports and their TLS stacks are off: what it asserts is that the

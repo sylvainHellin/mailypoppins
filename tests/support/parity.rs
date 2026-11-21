@@ -600,15 +600,55 @@ pub fn oracle(args: &[&str], tmp: &Path) -> Output {
     fs::create_dir_all(tmp).unwrap_or_else(|e| panic!("create {}: {e}", tmp.display()));
     let args = without_sort_relevance(args);
     let args = args.as_slice();
-    without_retired_body_sentence(todays_password_refusals(graph_without_smtp_warning(
-        piped_since_0144(
+    todays_frontmatter_refusals(without_retired_body_sentence(todays_password_refusals(
+        graph_without_smtp_warning(piped_since_0144(
             args,
             oracle_command(tmp)
                 .args(args)
                 .output()
                 .unwrap_or_else(|e| panic!("run oracle `mp {}`: {e}", args.join(" "))),
-        ),
+        )),
     )))
+}
+
+/// The oracle's output with a draft whose frontmatter is not YAML refused as
+/// today's binary refuses it.
+///
+/// The pre-daemon binary refused every such draft with `Failed to parse
+/// frontmatter: invalid type: null, expected struct EmailFrontmatter`, because
+/// `gray_matter`'s YAML engine turns a block that does not load into a null
+/// document; today's names the YAML parser's reason and the line, or the key
+/// written twice. Each line carrying the old sentence names the file, so the
+/// sentence becomes today's refusal of that file, and only when today's
+/// refusal is a syntax one: a block that is YAML `null` keeps the old
+/// sentence in both binaries. This takes that deliberate change out of a
+/// parity row the way [`graph_without_smtp_warning`] does.
+pub fn todays_frontmatter_refusals(mut out: Output) -> Output {
+    const ORACLE: &str =
+        "Failed to parse frontmatter: invalid type: null, expected struct EmailFrontmatter";
+    fn today(line: &str) -> Option<String> {
+        let before = &line[..line.find(ORACLE)?];
+        let before = before
+            .strip_suffix(" - ")
+            .or_else(|| before.strip_suffix(": "))?;
+        let path = before.rsplit(char::is_whitespace).next()?;
+        let error = mailypoppins::draft::parse_email_draft(Path::new(path)).err()?;
+        error
+            .chain()
+            .any(|cause| cause.is::<mailypoppins::draft::FrontmatterSyntaxError>())
+            .then(|| line.replacen(ORACLE, &format!("{error:#}"), 1))
+    }
+    for stream in [&mut out.stdout, &mut out.stderr] {
+        let text = String::from_utf8_lossy(stream);
+        if text.contains(ORACLE) {
+            *stream = text
+                .split_inclusive('\n')
+                .map(|line| today(line).unwrap_or_else(|| line.to_string()))
+                .collect::<String>()
+                .into_bytes();
+        }
+    }
+    out
 }
 
 /// The oracle's output with a missing password named as today's binary names

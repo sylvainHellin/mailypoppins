@@ -1753,7 +1753,10 @@ fn refuse_unparseable(account: &str, id: &str, path: &Path) -> RpcError {
     let message = payload
         .diagnostics
         .first()
-        .map(|diagnostic| diagnostic.message.clone())
+        .map(|diagnostic| match diagnostic.line {
+            Some(line) => format!("line {line}: {}", diagnostic.message),
+            None => diagnostic.message.clone(),
+        })
         .unwrap_or_else(|| format!("{} will not parse", path.display()));
     RpcError {
         code: ErrorCode::DraftInvalid.code(),

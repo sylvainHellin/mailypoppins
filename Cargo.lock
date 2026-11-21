@@ -2230,6 +2230,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "walkdir",
+ "yaml-rust2",
  "zeroize",
 ]
 
