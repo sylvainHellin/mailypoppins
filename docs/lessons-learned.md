@@ -3956,3 +3956,9 @@ cargo clippy --workspace --all-targets turns the test-support feature on in mp-t
 
 - A desktop `gui/` binding that flattens a protocol type (`LocalSearchHit` flattens `MessageListRow`) goes stale when the protocol type gains a field, and only the desktop crate's `generated_bindings_are_current` notices: after an `mp-protocol` change, run the whole of `pnpm gen:types` in `clients/desktop`, not only the `mp-protocol` export.
 - The desktop crate sits outside the workspace, so `cargo test --workspace` never builds it: a change that touches the desktop's Rust or what it imports also runs `cargo test` and `cargo clippy --all-targets -- -D warnings` in `clients/desktop/src-tauri`, where three test failures and a lint had gone unnoticed.
+
+## A calendar test seeded relative to `Utc::now()` fails only on the weekdays its offsets cross (2026-11-21)
+
+`the_layouts_ask_calendar_view_for_their_days` seeds its meeting at today + 2 and expected `w` to ask for today's week, so it passed Monday to Friday and failed every Saturday and Sunday.
+`w`, `d` and `a` (`calendar_set_layout`) re-anchor on the day under the agenda cursor, which opens on that meeting, so the expected days must come from the cursor's entry, not from today.
+The TUI has no clock seam (`CalendarView::default`, `App::load_calendar` and the `t` key read `Utc::now()`), so a fixture placed N days out must derive every expected date from the seeded day.
