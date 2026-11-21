@@ -328,39 +328,100 @@ async fn a_created_draft_names_the_subject_it_was_written_with() {
 // 5. A refusal's data
 // ---------------------------------------------------------------------------
 
-/// `draft.approve` on a file that will not parse refuses with `-32010` and
-/// the `draft.invalid` payload as its `data`: the file and the parser's
-/// diagnostics, which a client renders instead of rebuilding them from a
-/// listing (`mp_client::session::refusal` keeps it on the blocking path).
-#[tokio::test]
-async fn an_unparseable_draft_is_refused_with_its_payload() {
-    let slice = Slice::start();
-    let mut conn = slice.connect().await;
-    let stem = fixture::UNPARSEABLE_FILE.trim_end_matches(".md");
-    // The watcher announces a file with no id under its stem once its first
-    // poll settled; until then the stem resolves to nothing (`-32602`).
-    let mut refused = None;
+/// `draft.approve` on the draft file `stem` names, once the watcher announced
+/// it: a file with no id is announced under its stem once the first poll
+/// settled, and until then the stem resolves to nothing (`-32602`).
+async fn approval_refused(conn: &mut Connection, stem: &str) -> RpcError {
     for _ in 0..100 {
         let error = call_err(
-            &mut conn,
+            conn,
             "draft.approve",
             json!({"account": fixture::ACCOUNT, "id": stem}),
         )
         .await;
         if error.code != -32602 {
-            refused = Some(error);
-            break;
+            return error;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let refused = refused.expect("the watcher announced the file");
+    panic!("the watcher never announced {stem}");
+}
+
+/// `draft.approve` on a file that will not parse refuses with `-32010` and
+/// the `draft.invalid` payload as its `data`: the file and the parser's
+/// diagnostics, which a client renders instead of rebuilding them from a
+/// listing (`mp_client::session::refusal` keeps it on the blocking path).
+///
+/// The message leads with the diagnostic's line, once: the TUI prints only
+/// the message, and so does the desktop for a refusal without a payload, so
+/// the prefix is the one place such a client reads the line from.
+#[tokio::test]
+async fn an_unparseable_draft_is_refused_with_its_payload() {
+    let slice = Slice::start();
+    let mut conn = slice.connect().await;
+    let stem = fixture::UNPARSEABLE_FILE.trim_end_matches(".md");
+    let refused = approval_refused(&mut conn, stem).await;
     assert_eq!(refused.code, -32010);
+    // The quote opened on the file's fourth line, `subject: "Ohne Ende`, is
+    // never closed, so the scalar runs on into `status: draft`, a line less
+    // indented than a continuation must be; the parser names the line the
+    // scalar starts on.
+    assert_eq!(
+        refused.message,
+        "line 4: Failed to parse frontmatter: invalid indentation in quoted scalar"
+    );
+    assert_eq!(
+        refused.message.matches("line 4").count(),
+        1,
+        "the line is named once: {}",
+        refused.message
+    );
     let payload: mp_protocol::events::DraftInvalid =
         serde_json::from_value(refused.data.expect("the refusal carries data"))
             .expect("the data is the draft.invalid payload");
     assert_eq!(payload.id, stem);
     assert!(payload.path.ends_with(fixture::UNPARSEABLE_FILE));
-    assert!(!payload.diagnostics.is_empty());
+    assert_eq!(payload.diagnostics[0].line, Some(4), "{payload:?}");
+}
+
+/// A key written twice is refused through the same `-32010` path with a
+/// message that names the key and leads with the line of its second copy,
+/// once, rather than the line its mapping starts on.
+#[tokio::test]
+async fn a_draft_with_a_key_written_twice_is_refused_at_its_second_copy() {
+    let slice = Slice::start();
+    std::fs::write(
+        fixture::draft_path(slice.root(), fixture::ACCOUNT, "doppelt.md"),
+        "---\n\
+         id: e0000000000000d2\n\
+         to: robin@example.com\n\
+         attachments:\n  - /tmp/a.pdf\n\
+         subject: Angebot\n\
+         attachments:\n  - /tmp/b.pdf\n\
+         ---\n\
+         \n\
+         Body.\n",
+    )
+    .expect("write the draft");
+    let mut conn = slice.connect().await;
+    let refused = approval_refused(&mut conn, "doppelt").await;
+    assert_eq!(refused.code, -32010);
+    // The second `attachments:` stands on the file's seventh line.
+    assert_eq!(
+        refused.message,
+        "line 7: Failed to parse frontmatter: the key \"attachments\" is written more \
+         than once"
+    );
+    assert_eq!(
+        refused.message.matches("line 7").count(),
+        1,
+        "the line is named once: {}",
+        refused.message
+    );
+    let payload: mp_protocol::events::DraftInvalid =
+        serde_json::from_value(refused.data.expect("the refusal carries data"))
+            .expect("the data is the draft.invalid payload");
+    assert_eq!(payload.diagnostics[0].line, Some(7), "{payload:?}");
 }
 
 // ---------------------------------------------------------------------------
