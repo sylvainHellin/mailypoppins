@@ -1644,8 +1644,11 @@ Any test that only ever polls at the debounce interval cannot tell the middle ar
 `gray_matter`'s YAML engine is `YamlLoader::load_from_str(...).unwrap_or(Pod::Null)`, so a frontmatter block that does not scan reaches `parse_email_draft` as a null document and fails at the *deserialize* step with no line, no column and no mention of the syntax.
 The position exists, it is just thrown away one layer down.
 
-`src/daemon/watch.rs::frontmatter_line` recovers it with a second pass: slice the block between the two `---` delimiters, hand it to `serde_yaml::from_str::<serde_yaml::Value>`, and take `serde_yaml::Error::location()` offset by the lines before the block.
-A refusal by value rather than by syntax - a numeric `id:` (#0083) - parses cleanly in that second pass, which is exactly right: it has no position, and the diagnostic reports `null` instead of pointing the user at an innocent line.
+`parse_email_draft_content` (`crates/mp-core/src/draft.rs`) recovers it on the failure path only: when `gray_matter` hands back `Pod::Null`, it runs the same `yaml_rust2::YamlLoader` over `parsed.matter` and carries the error in the chain as `FrontmatterSyntaxError { line, reason }`, which the daemon's diagnostic reads its line from.
+`parsed.matter` is trimmed, so the file line is the opening delimiter plus the blank lines the trim dropped plus the block line.
+yaml-rust2's duplicate-key error names whichever key the mapping holds last and points past the value, so the key and the line of its second copy come from a scan of the parser's events, run only once the loader has refused the block over a duplicate.
+A refusal by value rather than by syntax, such as a numeric `id:` (#0083), loads cleanly, which is exactly right: it has no position, and the diagnostic reports `null` instead of pointing the user at an innocent line.
+The diagnostic keeps the line out of its message, so the `-32010` refusal puts `line N: ` in front of it for the clients that print only the message (the TUI, the desktop without a payload).
 
 ## A handle whose id names its directory needs the id before it has a path
 
