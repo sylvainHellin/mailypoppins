@@ -167,6 +167,7 @@ All notable changes to this project are documented in this file.
 - `mp config set-password` without `imap` or `smtp` prompts once and stores the password for both logins, a Graph account is pointed to `mp config oauth2-login`, health, the TUI and a held change or send name that command when the account uses one password, the desktop app offers Set password for both, and a set-password that fails on a full or read-only disk leaves the passwords as they were or says which one is stored (PERSO-297).
 
 ### Fixed
+- A draft whose frontmatter is not valid YAML is reported with the YAML parser's reason and its line in the file, and a key written twice is named with the line of its second copy, in the CLI, the TUI, the desktop app and the daemon's `draft.invalid` diagnostic, instead of "invalid type: null, expected struct EmailFrontmatter".
 - A hook's payload and `MP_HOOK_SELECTOR`, a reply's or forward's source, a sent draft's sent copy, an invitation event's source, `message.fetch` and a restored row name their own copy, UID included, when the mailbox holds a second copy of the message, as `mp show` does (PERSO-340).
 - The TUI says "Sync of <account> was dropped: the daemon restarted", as the desktop does, when a sync it started died with a daemon that never announced its stop, once the next daemon connects; before, only a log line recorded it (PERSO-341).
 - A sync that joined one already running prints that sync's outcome in `mp sync`, the TUI and the desktop app, where it printed nothing and `mp sync` exited 0.
