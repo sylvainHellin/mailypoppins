@@ -974,15 +974,25 @@ fn hiding_a_calendar_in_the_overlay_removes_its_events() {
 
 /// Each layout asks `calendar.view` for its own days, from midnight to
 /// midnight in the view's zone, and `l`/`h` move them.
+///
+/// `w` anchors the week on the day under the agenda's cursor, the meeting
+/// two days out, so the expected week is that day's and not today's: on a
+/// Saturday or a Sunday the meeting falls in the next week.
 #[test]
 fn the_layouts_ask_calendar_view_for_their_days() {
     let _data = seeded();
     let log = CallLog::default();
     let mut app = app_over(log.clone());
     app.switch_view(View::Calendar);
-    app.handle_key(key('w'));
     let today = Utc::now().date_naive();
-    let monday = today - Days::new(u64::from(today.weekday().num_days_from_monday()));
+    let meeting_day = at(2, 0).date_naive();
+    assert_eq!(
+        app.selected_calendar_entry().map(|entry| entry.day),
+        Some(meeting_day),
+        "the agenda's cursor starts on the meeting"
+    );
+    app.handle_key(key('w'));
+    let monday = meeting_day - Days::new(u64::from(meeting_day.weekday().num_days_from_monday()));
     let midnight = |day: chrono::NaiveDate| format!("{day}T00:00:00+00:00");
     let last = calls(&log, "calendar.view").pop().expect("a read");
     assert_eq!(last["start"], midnight(monday));
